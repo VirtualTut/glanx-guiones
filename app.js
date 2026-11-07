@@ -36,9 +36,11 @@ function pickFiles(accept, multiple = false) {
 const fmtDate = t => new Date(t).toLocaleString('es-CO', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 
 /* ================= Constantes ================= */
-const TYPES = [['scene', 'Escena'], ['action', 'Acción'], ['character', 'Personaje'], ['paren', 'Paréntesis'], ['dialogue', 'Diálogo'], ['transition', 'Transición']];
+// orden = atajo (Ctrl+0 … Ctrl+8) y orden del Tab
+const TYPES = [['act', 'Acto'], ['scene', 'Título de escena'], ['action', 'Acción'], ['character', 'Personaje'], ['dialogue', 'Diálogo'], ['paren', 'Entre paréntesis'], ['transition', 'Transición'], ['shot', 'Toma'], ['text', 'Texto']];
 const TYPE_KEYS = TYPES.map(t => t[0]);
-const NEXT = { scene: 'action', action: 'action', character: 'dialogue', paren: 'dialogue', dialogue: 'action', transition: 'scene' };
+const TYPE_LABEL = Object.fromEntries(TYPES);
+const NEXT = { act: 'scene', scene: 'action', action: 'action', character: 'dialogue', paren: 'dialogue', dialogue: 'action', transition: 'scene', shot: 'action', text: 'text' };
 const LINES_PER_PAGE = 55;
 const BD_CATS = [
   ['cast', 'Reparto', '#ef5b5b'], ['extras', 'Extras', '#f5a524'], ['props', 'Utilería', '#a970ff'],
@@ -134,6 +136,7 @@ function blockLines(b) {
   switch (b.t) {
     case 'scene': return 2; case 'action': return wrapL(b.x, 61) + 1; case 'character': return 2;
     case 'paren': return wrapL(b.x, 25); case 'dialogue': return wrapL(b.x, 35); case 'transition': return 2;
+    case 'act': return 3; case 'shot': return 2; case 'text': return wrapL(b.x, 61) + 1;
   } return 1;
 }
 function parseHeading(h) {
@@ -180,6 +183,7 @@ function parseScript(text) {
   for (; i < L.length; i++) {
     const s = L[i].trim(); const next = (L[i + 1] || '').trim();
     if (!s) { inDia = false; continue; }
+    if (/^#+\s*\S/.test(s) || (/^(ACTO|ACT)\s+\S+\.?$/.test(s) && s.length < 30)) { out.push({ t: 'act', x: s.replace(/^#+\s*/, '') }); inDia = false; continue; }
     if (isSceneLine(s) || /^\.[^.]/.test(s)) { out.push({ t: 'scene', x: isSceneLine(s) ? stripSceneNum(s) : s.replace(/^\./, '') }); inDia = false; continue; }
     if (inDia) { out.push({ t: /^\(.*\)$/.test(s) ? 'paren' : 'dialogue', x: s }); continue; }
     if (/^>/.test(s) && !/<$/.test(s)) { out.push({ t: 'transition', x: s.replace(/^>\s*/, '') }); continue; }
@@ -193,7 +197,7 @@ function parseScript(text) {
 }
 function parseFDX(xml) {
   const doc = new DOMParser().parseFromString(xml, 'application/xml');
-  const map = { 'Scene Heading': 'scene', 'Action': 'action', 'Character': 'character', 'Parenthetical': 'paren', 'Dialogue': 'dialogue', 'Transition': 'transition', 'Shot': 'action', 'General': 'action' };
+  const map = { 'Scene Heading': 'scene', 'Action': 'action', 'Character': 'character', 'Parenthetical': 'paren', 'Dialogue': 'dialogue', 'Transition': 'transition', 'Shot': 'shot', 'General': 'text', 'New Act': 'act', 'End of Act': 'act' };
   return $$('FinalDraft > Content > Paragraph', doc).map(p => ({ id: uid(), t: map[p.getAttribute('Type')] || 'action', x: $$('Text', p).map(t => t.textContent).join('') }))
     .filter(b => b.x.trim());
 }
@@ -350,7 +354,7 @@ async function docxParas(buf) {
     if (jc === 'right' || jc === 'end') indIn = 4.5;
     // estilos de guion (plantillas de Word, abcguionistas, exportación de Final Draft/Celtx)
     const sn = (styles[sid]?.name || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
-    const stype = /encabezado|scene ?heading|slug/.test(sn) ? 'scene' : /personaje|character/.test(sn) ? 'character'
+    const stype = /^(new act|end of act)|\bacto\b/.test(sn) ? 'act' : /\bshot\b|\btoma\b/.test(sn) ? 'shot' : /encabezado|scene ?heading|slug/.test(sn) ? 'scene' : /personaje|character/.test(sn) ? 'character'
       : /acotacion|parenthetical|parentesis/.test(sn) ? 'paren' : /dialogo|dialogue/.test(sn) ? 'dialogue'
       : /transicion|transition/.test(sn) ? 'transition' : /descripcion|^action|accion/.test(sn) ? 'action' : null;
     out.push({ text: clean, ind: indIn, size: chars ? szSum / chars / 2 : 11, bold: chars > 0 && boldChars >= chars * .8, level, stype, blank: true });
@@ -502,14 +506,43 @@ function txtParas(text) {
   return out;
 }
 
-const upT = b =>['scene', 'character', 'transition'].includes(b.t) ? b.x.toUpperCase() : b.x;
+const upT = b =>['scene', 'character', 'transition', 'act', 'shot'].includes(b.t) ? b.x.toUpperCase() : b.x;
+// formato dentro de un elemento: se guarda en b.h (solo <b>, <i> y <u>); b.x es siempre el texto plano
+const INLINE = { B: 'b', STRONG: 'b', I: 'i', EM: 'i', U: 'u' };
+function cleanInline(node) {
+  let s = '';
+  node.childNodes.forEach(n => {
+    if (n.nodeType === 3) { s += esc(n.textContent.replace(/\u00a0/g, ' ').replace(/\n/g, ' ')); return; }
+    if (n.nodeType !== 1 || n.nodeName === 'BR') return;
+    const tags = []; if (INLINE[n.nodeName]) tags.push(INLINE[n.nodeName]);
+    const st = n.style;
+    if (st) { if (/bold|[6-9]00/.test(st.fontWeight)) tags.push('b'); if (st.fontStyle === 'italic') tags.push('i'); if (/underline/.test(st.textDecoration || st.textDecorationLine || '')) tags.push('u'); }
+    const inner = cleanInline(n);
+    s += inner ? [...new Set(tags)].reduce((a, t) => `<${t}>${a}</${t}>`, inner) : '';
+  });
+  return s;
+}
+const tplOf = h => { const t = document.createElement('template'); t.innerHTML = h; return t.content; };
+const fmtHTML = b => b.h ? cleanInline(tplOf(b.h)) : esc(b.x);
+function runsOf(b) { // [{s, b, i, u}] para exportar
+  if (!b.h) return [{ s: upT(b) }];
+  const out = []; const up = upT(b) !== b.x;
+  const walk = (node, f) => node.childNodes.forEach(n => {
+    if (n.nodeType === 3) { if (n.textContent) out.push({ s: up ? n.textContent.toUpperCase() : n.textContent, ...f }); }
+    else if (n.nodeType === 1) walk(n, { ...f, [INLINE[n.nodeName] || '_']: true });
+  });
+  walk(tplOf(b.h), {}); return out;
+}
+const fountainText = b => runsOf(b).map(r => { let t = r.s; if (r.u) t = `_${t}_`; if (r.b && r.i) t = `***${t}***`; else if (r.b) t = `**${t}**`; else if (r.i) t = `*${t}*`; return t; }).join('');
 function toFountain() {
   let s = `Title: ${P.title}\nAuthor: ${P.author}\n${P.contact ? 'Contact: ' + P.contact + '\n' : ''}\n`;
   let prev = '';
   for (const b of P.blocks) {
-    const x = upT(b).trim(); if (!x) continue;
+    if (!b.x.trim()) continue; const x = b.h ? fountainText(b).trim() : upT(b).trim();
     if (b.t === 'scene') s += `\n${SCENE_RE.test(x) ? '' : '.'}${x}\n`;
-    else if (b.t === 'action') s += `\n${isCaps(x) ? '!' : ''}${x}\n`;
+    else if (b.t === 'act') s += `\n# ${x}\n`;
+    else if (b.t === 'shot') s += `\n!${x}\n`;
+    else if (b.t === 'action' || b.t === 'text') s += `\n${isCaps(x) ? '!' : ''}${x}\n`;
     else if (b.t === 'character') s += `\n${x}\n`;
     else if (b.t === 'paren') s += `${/^\(/.test(x) ? x : '(' + x + ')'}\n`;
     else if (b.t === 'dialogue') s += `${x}\n`;
@@ -519,10 +552,11 @@ function toFountain() {
   return s;
 }
 function toFDX() {
-  const rev = { scene: 'Scene Heading', action: 'Action', character: 'Character', paren: 'Parenthetical', dialogue: 'Dialogue', transition: 'Transition' };
+  const rev = { scene: 'Scene Heading', action: 'Action', character: 'Character', paren: 'Parenthetical', dialogue: 'Dialogue', transition: 'Transition', act: 'New Act', shot: 'Shot', text: 'General' };
+  const style = r => [r.b && 'Bold', r.i && 'Italic', r.u && 'Underline'].filter(Boolean).join('+');
   const x = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return `<?xml version="1.0" encoding="UTF-8" standalone="no" ?>\n<FinalDraft DocumentType="Script" Template="No" Version="5">\n<Content>\n` +
-    P.blocks.filter(b => b.x.trim()).map(b => `<Paragraph Type="${rev[b.t]}"><Text>${x(upT(b))}</Text></Paragraph>`).join('\n') +
+    P.blocks.filter(b => b.x.trim()).map(b => `<Paragraph Type="${rev[b.t]}">${runsOf(b).map(r => `<Text${style(r) ? ` Style="${style(r)}"` : ''}>${x(r.s)}</Text>`).join('')}</Paragraph>`).join('\n') +
     `\n</Content>\n<TitlePage><Content><Paragraph Alignment="Center"><Text>${x(P.title.toUpperCase())}</Text></Paragraph><Paragraph Alignment="Center"><Text>${x(P.author)}</Text></Paragraph></Content></TitlePage>\n</FinalDraft>`;
 }
 
@@ -690,13 +724,13 @@ document.addEventListener('click', e => { if (!e.target.closest('.menu')) $('#me
 $('#menu').addEventListener('click', async e => {
   const a = e.target.closest('[data-act]')?.dataset.act; if (!a) return;
   $('#menu').hidden = true; syncNow(); flushSave();
-  if (a === 'pdf') printScript();
+  if (a === 'export') exportDialog();
+  else if (a === 'pdf') printScript();
   else if (a === 'printview') printView();
   else if (a === 'fountain') download(slug(P.title) + '.fountain', toFountain());
   else if (a === 'fdx') download(slug(P.title) + '.fdx', toFDX(), 'application/xml');
   else if (a === 'json') {
-    const images = {}; for (const id of imageIds(P)) { const d = await imgGet(id); if (d) images[id] = d; }
-    download(`${slug(P.title)}-${new Date().toISOString().slice(0, 10)}.glanx.json`, JSON.stringify({ app: 'glanx-guiones', version: 1, exported: Date.now(), project: P, images }), 'application/json');
+    download(`${slug(P.title)}-${new Date().toISOString().slice(0, 10)}.glanx.json`, await backupJSON(), 'application/json');
     toast('Respaldo descargado: súbelo a Drive');
   } else if (a === 'info') infoDialog();
 });
@@ -723,17 +757,153 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') { $('#lightbox').hidden = true; $('#dialog').hidden = true; hideTagpop(); }
 });
 
-/* ================= Impresión ================= */
-function printScript() {
-  const pr = $('#print');
-  pr.innerHTML = `<div class="title-page"><h1>${esc(P.title.toUpperCase())}</h1>
+async function backupJSON() {
+  const images = {}; for (const id of imageIds(P)) { const d = await imgGet(id); if (d) images[id] = d; }
+  return JSON.stringify({ app: 'glanx-guiones', version: 1, exported: Date.now(), project: P, images });
+}
+
+/* ================= Exportar (todo o por secciones) ================= */
+const EXP = [['guion', 'Guion (con portada)'], ['desglose', 'Desglose'], ['planos', 'Lista de planos'], ['rodaje', 'Plan de rodaje'], ['presupuesto', 'Presupuesto'], ['moodboard', 'Moodboard']];
+const mbBoards = () => { const ids = new Set(getScenes().map(s => s.id)); ids.add('general'); return Object.entries(P.canvas || {}).filter(([sid, cv]) => ids.has(sid) && cv.items?.some(i => i.type !== 'slot')); };
+function expInfo(k) {
+  const sc = getScenes();
+  if (k === 'guion') return `≈ ${totalPages()} pág.`;
+  if (k === 'desglose') return `${bdElements().length} elementos`;
+  if (k === 'planos') return `${sc.reduce((a, s) => a + meta(s.id).shots.length, 0)} planos`;
+  if (k === 'rodaje') return `${P.days.length} días`;
+  if (k === 'presupuesto') return money(budgetTotals().total);
+  if (k === 'moodboard') return `${mbBoards().length} tableros`;
+}
+function exportDialog() {
+  UI.exp ||= new Set(EXP.map(e => e[0]));
+  const d = $('#dialog');
+  d.innerHTML = `<div class="dialog"><h3>Exportar</h3>
+    <div class="row" style="margin:0 0 4px"><span class="muted" style="font-size:12px">Qué incluir</span><span class="spacer"></span><button class="btn sm" data-all>Todo</button><button class="btn sm" data-none>Nada</button></div>
+    <div class="chk-list">${EXP.map(([k, l]) => `<label class="chk"><input type="checkbox" data-s="${k}" ${UI.exp.has(k) ? 'checked' : ''}><span>${l}</span><span class="muted">${expInfo(k)}</span></label>`).join('')}</div>
+    <label class="chk" style="margin-top:10px"><input type="checkbox" data-json checked><span>Respaldo .json dentro del .zip</span><span class="muted">para volver a abrirlo aquí</span></label>
+    <p class="muted" style="font-size:12px;margin:10px 0 0"><b>PDF:</b> un solo documento con lo marcado (en la ventana de imprimir, elige «Guardar como PDF»).<br><b>Archivos .zip:</b> guion en Fountain y Final Draft, tablas .csv que abre Excel, imágenes de los planos, moodboards en PNG y el respaldo.</p>
+    <div class="row"><button class="btn" data-x>Cancelar</button><button class="btn" data-zip>Archivos (.zip)</button><button class="btn pri" data-pdf>PDF</button></div></div>`;
+  d.hidden = false;
+  const secs = () => EXP.map(e => e[0]).filter(k => $(`[data-s="${k}"]`, d).checked);
+  d.onclick = e => {
+    if (e.target === d || e.target.closest('[data-x]')) { d.hidden = true; return; }
+    if (e.target.closest('[data-all]') || e.target.closest('[data-none]')) { const on = !!e.target.closest('[data-all]'); $$('[data-s]', d).forEach(x => x.checked = on); return; }
+    const pdf = e.target.closest('[data-pdf]'), zip = e.target.closest('[data-zip]'); if (!pdf && !zip) return;
+    const S = secs(); if (!S.length) return toast('Marca al menos una sección');
+    UI.exp = new Set(S); d.hidden = true;
+    if (pdf) exportPDF(S); else exportZip(S, $('[data-json]', d).checked);
+  };
+}
+const prHead = t => `<header class="pr-h"><span>${esc(P.title)}</span><h1>${t}</h1></header>`;
+function prDesglose(scenes) {
+  const rows = scenes.map(s => {
+    const m = meta(s.id);
+    const cats = BD_CATS.map(([k, l, c]) => { const v = [...new Set([...(k === 'cast' ? s.chars : []), ...(m.bd[k] || [])])]; return v.length ? `<tr><td style="color:${c};font-weight:700;width:170px">${l}</td><td>${esc(v.join(', '))}</td></tr>` : ''; }).join('');
+    if (!cats && !m.notes) return '';
+    return `<div class="pr-block"><h3>${s.num}. ${esc(s.heading)} <small>${fmtE(s.eighths)} pág.</small></h3><table class="pr-table">${cats}${m.notes ? `<tr><td style="width:170px;font-weight:700">Notas</td><td>${esc(m.notes)}</td></tr>` : ''}</table></div>`;
+  }).join('');
+  return rows || '<p>Aún no hay nada desglosado.</p>';
+}
+function prPlanos(scenes) {
+  const out = scenes.filter(s => meta(s.id).shots.length).map(s => `<div class="pr-block"><h3>${s.num}. ${esc(s.heading)}</h3><table class="pr-table"><thead><tr><th>Plano</th><th>Tamaño</th><th>Lente</th><th>Movimiento</th><th>Descripción</th><th>Dur.</th><th>Ref.</th></tr></thead><tbody>
+    ${meta(s.id).shots.map((sh, i) => `<tr><td><b>${shotCode(s, i)}</b></td><td>${esc(sh.size)}</td><td>${esc(sh.lens)}</td><td>${esc(sh.move)}</td><td>${esc(sh.desc)}</td><td>${sh.dur ? esc(sh.dur) + ' s' : ''}</td><td>${sh.img ? `<img class="pr-thumb" data-img="${sh.img}" alt="">` : ''}</td></tr>`).join('')}</tbody></table></div>`).join('');
+  return out || '<p>Aún no hay planos.</p>';
+}
+function prRodaje(scenes) {
+  const byId = Object.fromEntries(scenes.map(s => [s.id, s]));
+  const table = ids => `<table class="pr-table"><thead><tr><th>Esc.</th><th>I/E</th><th>Locación</th><th>Momento</th><th>Pág.</th><th>Personajes</th><th>Planos</th></tr></thead><tbody>
+    ${ids.map(id => byId[id]).filter(Boolean).map(s => `<tr><td class="pr-strip ${stripClass(s)}"><b>${s.num}</b></td><td>${s.ie || '—'}</td><td>${esc(s.loc)}</td><td>${esc(s.time) || '—'}</td><td>${fmtE(s.eighths)}</td><td>${esc(s.chars.join(', '))}</td>
+      <td>${meta(s.id).shots.map((sh, i) => `<div><b>${shotCode(s, i)}</b> ${esc([sh.size, sh.desc].filter(Boolean).join(' — '))}</div>`).join('')}</td></tr>`).join('')}</tbody></table>`;
+  const assigned = new Set(P.days.flatMap(d => d.scenes)); const pool = scenes.filter(s => !assigned.has(s.id)).map(s => s.id);
+  const pg = ids => fmtE(ids.reduce((a, id) => a + (byId[id]?.eighths || 0), 0));
+  return P.days.map((d, i) => `<div class="pr-block"><h3>Día ${i + 1}${d.date ? ' · ' + new Date(d.date + 'T12:00').toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long' }) : ''}${d.note ? ' · ' + esc(d.note) : ''} <small>${d.scenes.length} esc. · ${pg(d.scenes)} pág.</small></h3>${d.scenes.length ? table(d.scenes) : '<p>Sin escenas.</p>'}</div>`).join('')
+    + (pool.length ? `<div class="pr-block"><h3>Sin asignar <small>${pool.length} esc.</small></h3>${table(pool)}</div>` : '') || '<p>Aún no hay plan de rodaje.</p>';
+}
+function prPresupuesto() {
+  const B = P.budget, T = budgetTotals(), f = fitInfo(T);
+  return `<table class="pr-table pr-kpi"><tr><td>Presupuesto inicial</td><td class="num">${num(B.target) ? money(num(B.target)) : '—'}</td></tr>
+    <tr><td>Previsto</td><td class="num">${money(T.plan)}</td></tr><tr><td>Imprevistos (${num(B.contingency)} %)</td><td class="num">${money(T.cont)}</td></tr>
+    <tr><td><b>Total</b></td><td class="num"><b>${money(T.total)}</b></td></tr>${num(B.target) ? `<tr><td>${f.l}</td><td class="num">${f.v}</td></tr>` : ''}
+    <tr><td>Gastado real</td><td class="num">${money(T.act)}</td></tr>${P.days.length ? `<tr><td>Por día de rodaje (${P.days.length})</td><td class="num">${money(T.total / P.days.length)}</td></tr>` : ''}</table>
+    ${B.depts.map((d, i) => d.items.length ? `<div class="pr-block"><h3>${esc(d.name)} <small>${money(T.depts[i].p)}</small></h3><table class="pr-table"><thead><tr><th>Concepto</th><th class="num">Cant.</th><th>Unidad</th><th class="num">Valor unitario</th><th class="num">Previsto</th><th class="num">Real</th></tr></thead><tbody>
+      ${d.items.map(it => `<tr><td>${esc(it.name)}</td><td class="num">${esc(it.qty)}</td><td>${esc(it.unit)}</td><td class="num">${money(num(it.cost))}</td><td class="num">${money(num(it.qty) * num(it.cost))}</td><td class="num">${num(it.actual) ? money(num(it.actual)) : ''}</td></tr>`).join('')}</tbody></table></div>` : '').join('')}`;
+}
+async function prMoodboard(scenes) {
+  const out = [];
+  for (const [sid, cv] of mbBoards()) {
+    const sc = scenes.find(s => s.id === sid);
+    const c = await mbRenderCanvas(cv, null, 1);
+    out.push(`<div class="pr-block pr-mb"><h3>${sc ? `${sc.num}. ${esc(sc.heading)}` : 'General'}</h3><img src="${c.toDataURL('image/jpeg', .9)}" alt=""></div>`);
+  }
+  return out.join('') || '<p>Aún no hay moodboards.</p>';
+}
+const titlePageHTML = () => `<div class="title-page"><h1>${esc(P.title.toUpperCase())}</h1>
     ${P.logline ? `<p style="max-width:4.5in;font-style:italic">${esc(P.logline)}</p>` : ''}
     <p>Escrito por</p><p>${esc(P.author || 'Glanx Studio')}</p>
-    <div class="tp-foot">${esc(P.contact || 'Glanx Studio')}<br>${new Date().toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })}</div></div>
-    <div class="script">${P.blocks.filter(b => b.x.trim()).map(b => `<div class="el" data-t="${b.t}">${esc(b.x)}</div>`).join('')}</div>`;
+    <div class="tp-foot">${esc(P.contact || 'Glanx Studio')}<br>${new Date().toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })}</div></div>`;
+async function exportPDF(secs) {
+  syncNow(); flushSave(); toast('Preparando el PDF…');
+  const scenes = getScenes(), parts = [];
+  if (secs.includes('guion')) parts.push(`<div class="pr-script">${titlePageHTML()}<div class="script">${P.blocks.filter(b => b.x.trim()).map(b => `<div class="el" data-t="${b.t}">${fmtHTML(b)}</div>`).join('')}</div></div>`);
+  else parts.push(`<section class="pr-sec pr-cover"><h1>${esc(P.title)}</h1><p>${secs.map(k => EXP.find(e => e[0] === k)[1]).join(' · ')}</p><p>${esc(P.author || 'Glanx Studio')} · ${new Date().toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })}</p></section>`);
+  if (secs.includes('desglose')) parts.push(`<section class="pr-sec">${prHead('Desglose')}${prDesglose(scenes)}</section>`);
+  if (secs.includes('planos')) parts.push(`<section class="pr-sec">${prHead('Lista de planos')}${prPlanos(scenes)}</section>`);
+  if (secs.includes('rodaje')) parts.push(`<section class="pr-sec">${prHead('Plan de rodaje')}${prRodaje(scenes)}</section>`);
+  if (secs.includes('presupuesto')) parts.push(`<section class="pr-sec">${prHead('Presupuesto')}${prPresupuesto()}</section>`);
+  if (secs.includes('moodboard')) parts.push(`<section class="pr-sec">${prHead('Moodboard')}${await prMoodboard(scenes)}</section>`);
+  const pr = $('#print'); pr.innerHTML = parts.join('');
+  await Promise.all($$('img', pr).map(async im => { if (im.dataset.img) { const d = await imgGet(im.dataset.img); if (d) im.src = d; } try { await im.decode(); } catch {} }));
   document.body.classList.add('printing-script');
-  setTimeout(() => { window.print(); }, 50);
+  setTimeout(() => window.print(), 60);
 }
+async function exportZip(secs, withJson) {
+  syncNow(); flushSave(); toast('Preparando los archivos…');
+  try { await loadScript(LIBS.zip); } catch (e) { toast(e.message); return; }
+  const z = new JSZip(), base = slug(P.title), scenes = getScenes();
+  const cell = v => { v = String(v ?? ''); return /[;"\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  const csv = rows => '\ufeff' + rows.map(r => r.map(cell).join(';')).join('\r\n');
+  const nf = v => String(num(v)).replace('.', ',');
+  const dataPart = d => d.split(',')[1], extOf = d => (/^data:image\/(\w+)/.exec(d)?.[1] || 'jpg').replace('jpeg', 'jpg');
+  if (secs.includes('guion')) { z.file(base + '.fountain', toFountain()); z.file(base + '.fdx', toFDX()); }
+  if (secs.includes('desglose')) {
+    const rows = [['Escena', 'Encabezado', 'Categoría', 'Elemento']];
+    scenes.forEach(s => { const m = meta(s.id); BD_CATS.forEach(([k, l]) => [...new Set([...(k === 'cast' ? s.chars : []), ...(m.bd[k] || [])])].forEach(v => rows.push([s.num, s.heading, l, v]))); if (m.notes) rows.push([s.num, s.heading, 'Notas', m.notes]); });
+    z.file('desglose.csv', csv(rows));
+  }
+  if (secs.includes('planos')) {
+    const rows = [['Plano', 'Escena', 'Encabezado', 'Tamaño', 'Lente', 'Movimiento', 'Descripción', 'Duración (s)', 'Imagen']];
+    for (const s of scenes) for (const [i, sh] of meta(s.id).shots.entries()) {
+      let file = '';
+      if (sh.img) { const d = await imgGet(sh.img); if (d) { file = `planos/${shotCode(s, i)}.${extOf(d)}`; z.file(file, dataPart(d), { base64: true }); } }
+      rows.push([shotCode(s, i), s.num, s.heading, sh.size, sh.lens, sh.move, sh.desc, sh.dur ? nf(sh.dur) : '', file]);
+    }
+    z.file('planos.csv', csv(rows));
+  }
+  if (secs.includes('rodaje')) {
+    const byId = Object.fromEntries(scenes.map(s => [s.id, s]));
+    const rows = [['Día', 'Fecha', 'Notas del día', 'Escena', 'I/E', 'Locación', 'Momento', 'Páginas', 'Personajes', 'Planos']];
+    P.days.forEach((d, i) => d.scenes.map(id => byId[id]).filter(Boolean).forEach(s => rows.push([i + 1, d.date || '', d.note || '', s.num, s.ie, s.loc, s.time, nf(Math.round(s.eighths / 8 * 1000) / 1000), s.chars.join(', '), meta(s.id).shots.map((sh, j) => shotCode(s, j)).join(' ')])));
+    z.file('plan-de-rodaje.csv', csv(rows));
+  }
+  if (secs.includes('presupuesto')) {
+    const B = P.budget, T = budgetTotals();
+    const rows = [['Departamento', 'Concepto', 'Cantidad', 'Unidad', 'Valor unitario', 'Previsto', 'Real']];
+    B.depts.forEach(d => d.items.forEach(it => rows.push([d.name, it.name, nf(it.qty), it.unit, nf(it.cost), nf(num(it.qty) * num(it.cost)), nf(it.actual)])));
+    rows.push([], ['', 'Previsto', '', '', '', nf(T.plan), nf(T.act)], ['', `Imprevistos (${num(B.contingency)} %)`, '', '', '', nf(T.cont)], ['', 'Total', '', '', '', nf(T.total)], ['', 'Presupuesto inicial', '', '', '', nf(B.target)], ['', 'Moneda: ' + B.currency]);
+    z.file('presupuesto.csv', csv(rows));
+  }
+  if (secs.includes('moodboard')) for (const [sid, cv] of mbBoards()) {
+    const sc = scenes.find(s => s.id === sid);
+    const c = await mbRenderCanvas(cv, null, 2);
+    z.file(`moodboard/${sc ? 'escena-' + sc.num : 'general'}.png`, await new Promise(r => c.toBlob(r, 'image/png')));
+  }
+  if (withJson) z.file(base + '.glanx.json', await backupJSON());
+  const blob = await z.generateAsync({ type: 'blob' });
+  download(`${base}-${new Date().toISOString().slice(0, 10)}.zip`, blob); toast('Archivos descargados');
+}
+
+/* ================= Impresión ================= */
+function printScript() { exportPDF(['guion']); }
 function printView() { $$('details.dept').forEach(d => d.open = true); window.print(); }
 window.addEventListener('afterprint', () => { document.body.classList.remove('printing-script'); $('#print').innerHTML = ''; });
 
@@ -754,7 +924,7 @@ function bindSide(onPick) {
 
 /* ================= GUION (editor) ================= */
 let syncTimer = null;
-function blockHTML(b) { return `<div class="el" data-t="${b.t}" data-id="${b.id}">${b.x ? esc(b.x) : '<br>'}</div>`; }
+function blockHTML(b) { return `<div class="el" data-t="${b.t}" data-id="${b.id}">${b.x ? fmtHTML(b) : '<br>'}</div>`; }
 function mkBlock(b) { const t = document.createElement('template'); t.innerHTML = blockHTML(b); return t.content.firstChild; }
 function setText(el, t) { if (t) el.textContent = t; else el.innerHTML = '<br>'; }
 
@@ -762,8 +932,13 @@ function renderGuion() {
   app.innerHTML = `<div class="layout">
     <aside class="side" id="gSide"></aside>
     <section class="editor-wrap">
-      <div class="toolbar">${TYPES.map(([t, l], i) => `<button data-type="${t}" title="${l} (Ctrl+${i + 1})">${l}</button>`).join('')}
-        <span class="hint">Enter: siguiente elemento · Tab: cambiar tipo</span><span class="info" id="pageInfo"></span></div>
+      <div class="toolbar">
+        <div class="tsel"><button class="type-btn" data-typebtn title="Tipo de elemento"><span id="typeLbl">Acción</span><i>▾</i></button>
+          <div class="type-menu" id="typeMenu" hidden><div class="tm-h">TAB para cambiar</div>
+          ${TYPES.map(([t, l], i) => `<button data-type="${t}"><span>${l}</span><kbd>Ctrl+${i}</kbd></button>`).join('')}</div></div>
+        <span class="tsep"></span>
+        <button class="fmt" data-fmt="bold" title="Negrita (Ctrl+B)"><b>B</b></button><button class="fmt" data-fmt="italic" title="Cursiva (Ctrl+I)"><i>I</i></button><button class="fmt" data-fmt="underline" title="Subrayado (Ctrl+U)"><u>U</u></button>
+        <span class="hint">Enter: siguiente · Tab: cambiar tipo · Ctrl+0…8: tipo directo</span><span class="info" id="pageInfo"></span></div>
       <div class="paper-scroll"><div class="paper"><div id="ed" class="script" contenteditable="true" spellcheck="true" lang="es"></div></div></div>
     </section></div>`;
   const ed = $('#ed');
@@ -773,16 +948,23 @@ function renderGuion() {
     const el = ed.querySelector(`[data-id="${sid}"]`); if (!el) return;
     el.scrollIntoView({ behavior: 'smooth', block: 'center' }); ed.focus(); setCaret(el, el.textContent.length); markCur();
   });
+  try { document.execCommand('styleWithCSS', false, false); } catch {}
   $('.toolbar').addEventListener('mousedown', e => {
-    const b = e.target.closest('[data-type]'); if (!b) return; e.preventDefault();
+    if (e.target.closest('[data-typebtn]')) { e.preventDefault(); $('#typeMenu').hidden = !$('#typeMenu').hidden; return; }
+    const f = e.target.closest('[data-fmt]');
+    if (f) { e.preventDefault(); if (!caretInfo()) return; document.execCommand(f.dataset.fmt); scheduleSync(true); markCur(); return; }
+    const b = e.target.closest('[data-type]'); if (!b) return; e.preventDefault(); $('#typeMenu').hidden = true;
     const c = caretInfo(); if (c) setType(c.el, b.dataset.type); else if (ed.lastElementChild) setType(ed.lastElementChild, b.dataset.type);
   });
+  document.addEventListener('mousedown', e => { if (!e.target.closest('.tsel')) $('#typeMenu') && ($('#typeMenu').hidden = true); });
+  ed.addEventListener('blur', () => acClose());
+  $('.paper-scroll').addEventListener('scroll', () => acClose(), { passive: true });
   ed.addEventListener('keydown', onEdKey);
   ed.addEventListener('paste', onEdPaste);
   ed.addEventListener('input', () => {
     const c = caretInfo();
     if (c && c.el.dataset.t === 'action' && SCENE_RE.test(c.el.textContent)) setType(c.el, 'scene', true);
-    scheduleSync();
+    scheduleSync(); acUpdate();
   });
   ed.addEventListener('drop', e => e.preventDefault());
   if (P.blocks.length <= 2 && !P.blocks.some(b => b.x && b.x !== 'INT. LUGAR - DÍA')) { ed.focus(); setCaret(ed.firstElementChild, ed.firstElementChild.textContent.length); }
@@ -793,6 +975,9 @@ function markCur() {
   $$('#ed .el.cur').forEach(x => x !== cur && x.classList.remove('cur'));
   if (cur) cur.classList.add('cur');
   $$('.toolbar [data-type]').forEach(b => b.classList.toggle('on', !!cur && b.dataset.type === cur.dataset.t));
+  if ($('#typeLbl')) $('#typeLbl').textContent = cur ? TYPE_LABEL[cur.dataset.t] || 'Acción' : '—';
+  $$('.toolbar [data-fmt]').forEach(b => { let on = false; try { on = !!cur && document.queryCommandState(b.dataset.fmt); } catch {} b.classList.toggle('on', on); });
+  acUpdate();
 }
 function caretInfo() {
   const ed = $('#ed'); const sel = getSelection(); if (!ed || !sel.rangeCount) return null;
@@ -819,7 +1004,9 @@ function setType(el, t, keepCaret) {
 }
 function onEdKey(e) {
   const mod = e.ctrlKey || e.metaKey;
-  if (mod && /^[1-6]$/.test(e.key)) { e.preventDefault(); const c = caretInfo(); if (c) setType(c.el, TYPE_KEYS[+e.key - 1]); return; }
+  if (acKey(e)) return;
+  const dig = /^Digit([0-8])$/.exec(e.code)?.[1] ?? (/^[0-8]$/.test(e.key) ? e.key : null);
+  if (mod && !e.altKey && dig != null) { e.preventDefault(); const c = caretInfo(); if (c) setType(c.el, TYPE_KEYS[+dig]); return; }
   if (e.key === 'Tab') {
     e.preventDefault(); const c = caretInfo(); if (!c) return;
     const i = TYPE_KEYS.indexOf(c.el.dataset.t), n = TYPE_KEYS.length;
@@ -840,8 +1027,9 @@ function onEdKey(e) {
       if (SCENE_RE.test(s)) el.dataset.t = t = 'scene';
       else if (isCaps(s) && /(TO:|A:)$/.test(s) && s.length < 40) el.dataset.t = t = 'transition';
     }
-    setText(el, before);
-    const nb = mkBlock({ id: uid(), t: after ? t : NEXT[t], x: after });
+    const nb = mkBlock({ id: uid(), t: after ? t : NEXT[t], x: '' });
+    if (after) { const s0 = getSelection().getRangeAt(0), r = document.createRange(); r.setStart(s0.startContainer, s0.startOffset); r.setEnd(el, el.childNodes.length); nb.innerHTML = ''; nb.appendChild(r.extractContents()); }
+    if (!el.textContent) el.innerHTML = '<br>';
     el.after(nb); setCaret(nb, 0);
     nb.scrollIntoView({ block: 'nearest' }); scheduleSync(true); markCur();
     return;
@@ -852,15 +1040,92 @@ function onEdKey(e) {
     e.preventDefault();
     if (!prev) { if (c.el.dataset.t !== 'action') setType(c.el, 'action'); return; }
     if (!c.el.textContent && c.el.dataset.t !== 'action' && c.el.dataset.t !== NEXT[prev.dataset.t]) { setType(c.el, NEXT[prev.dataset.t] || 'action'); return; }
-    const pl = prev.textContent.length; setText(prev, prev.textContent + c.el.textContent);
+    const pl = prev.textContent.length; joinEl(prev, c.el);
     c.el.remove(); setCaret(prev, pl); scheduleSync(true); markCur(); return;
   }
   if (e.key === 'Delete') {
     const c = caretInfo(); if (!c || !c.collapsed || c.off !== c.el.textContent.length) return;
     const next = c.el.nextElementSibling; if (!next) return;
     e.preventDefault(); const l = c.el.textContent.length;
-    setText(c.el, c.el.textContent + next.textContent); next.remove(); setCaret(c.el, l); scheduleSync(true);
+    joinEl(c.el, next); next.remove(); setCaret(c.el, l); scheduleSync(true);
   }
+}
+// une dos elementos sin perder negritas, cursivas ni subrayados
+function joinEl(a, b) {
+  $$(':scope > br', a).forEach(x => x.remove());
+  [...b.childNodes].forEach(n => { if (n.nodeName !== 'BR') a.appendChild(n); });
+  if (!a.textContent) a.innerHTML = '<br>';
+}
+
+/* ---------- Autocompletar: INT./EXT., locaciones, momentos del día, personajes, transiciones ---------- */
+const AC = { el: null, items: [], i: 0, from: 0, nav: false, key: '', shut: '' };
+const AC_TIMES = ['DÍA', 'NOCHE', 'ATARDECER', 'AMANECER', 'MAÑANA', 'TARDE', 'CONTINUO', 'MÁS TARDE', 'MOMENTOS DESPUÉS', 'MISMO MOMENTO'];
+const AC_TRANS = ['CORTE A:', 'FUNDIDO A NEGRO.', 'FUNDIDO DE ENTRADA:', 'DISOLVENCIA A:', 'CORTE A NEGRO.', 'CORTE ABRUPTO A:', 'FUNDE A NEGRO.'];
+const AC_ACTS = ['ACTO UNO', 'ACTO DOS', 'ACTO TRES', 'ACTO CUATRO', 'ACTO CINCO', 'PRÓLOGO', 'EPÍLOGO'];
+const fold = s => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().trim();
+const edTexts = (t, except) => $$(`#ed > .el[data-t="${t}"]`).filter(e => e !== except).map(e => e.textContent.trim()).filter(Boolean);
+function acCompute(el, txt) {
+  const t = el.dataset.t;
+  const pick = (list, q, from, suffix = '') => {
+    const seen = new Set(), items = [];
+    for (const v of list) { const k = fold(v); if (!k || seen.has(k)) continue; seen.add(k); if (k.startsWith(fold(q)) && k !== fold(q)) items.push({ label: v.toUpperCase(), ins: v.toUpperCase() + suffix }); }
+    return { from, items: items.slice(0, 8) };
+  };
+  if (t === 'scene') {
+    const m = txt.match(/^(\s*)(INT\.?\s*\/\s*EXT\.?|EXT\.?\s*\/\s*INT\.?|I\/E\.?|INTERIOR|EXTERIOR|INT\.?|EXT\.?)\s+/i);
+    if (!m) return pick(['INT.', 'EXT.', 'INT./EXT.'], txt, 0, ' ');
+    const rest = txt.slice(m[0].length), heads = edTexts('scene', el).map(parseHeading);
+    const dash = [...rest.matchAll(/\s[-–—]\s*/g)].pop();
+    if (!dash) return pick(heads.map(h => h.loc).filter(l => l !== '—'), rest, m[0].length, ' - ');
+    const from = m[0].length + dash.index + dash[0].length;
+    return pick([...AC_TIMES, ...heads.map(h => h.time).filter(Boolean)], txt.slice(from), from);
+  }
+  if (t === 'character') {
+    const p = txt.lastIndexOf('(');
+    if (p >= 0) return pick(['V.O.)', 'O.S.)', 'CONT.)', 'OFF)'], txt.slice(p + 1), p + 1);
+    return pick(edTexts('character', el).map(cleanChar), txt, 0);
+  }
+  if (t === 'transition') return pick([...AC_TRANS, ...edTexts('transition', el)], txt, 0);
+  if (t === 'shot') return pick([...edTexts('shot', el), ...SIZES], txt, 0);
+  if (t === 'act') return pick([...AC_ACTS, ...edTexts('act', el)], txt, 0);
+  return null;
+}
+function acPop() { let p = $('#acpop'); if (!p) { p = document.createElement('div'); p.id = 'acpop'; p.className = 'acpop'; p.hidden = true; document.body.appendChild(p);
+  p.addEventListener('mousedown', e => { e.preventDefault(); const b = e.target.closest('[data-ac]'); if (b) acAccept(+b.dataset.ac); }); } return p; }
+function acClose() { AC.items = []; const p = $('#acpop'); if (p) p.hidden = true; }
+function acUpdate() {
+  const ed = $('#ed'); if (!ed || document.activeElement !== ed) return acClose();
+  const c = caretInfo();
+  if (!c || !c.collapsed || c.off !== c.el.textContent.length) return acClose();
+  const txt = c.el.textContent.replace(/\u00a0/g, ' '), key = c.el.dataset.id + '|' + c.el.dataset.t + '|' + txt;
+  if (AC.shut === key) return acClose();
+  const r = acCompute(c.el, txt);
+  if (!r || !r.items.length) return acClose();
+  if (AC.key !== key) { AC.i = 0; AC.nav = false; }
+  Object.assign(AC, { el: c.el, items: r.items, from: r.from, key });
+  const p = acPop();
+  p.innerHTML = `<div class="ac-h">Tab o Enter para completar · Esc para cerrar</div>` + AC.items.map((it, i) => `<button data-ac="${i}" class="${i === AC.i ? 'on' : ''}">${esc(it.label)}</button>`).join('');
+  p.hidden = false;
+  const sel = getSelection(); let rc = sel.rangeCount ? sel.getRangeAt(0).getClientRects()[0] : null;
+  if (!rc || (!rc.left && !rc.top)) { const b = c.el.getBoundingClientRect(); rc = { left: b.left, bottom: b.bottom }; }
+  const h = p.offsetHeight, w = p.offsetWidth;
+  p.style.left = Math.max(8, Math.min(innerWidth - w - 8, rc.left)) + 'px';
+  p.style.top = (rc.bottom + 6 + h > innerHeight ? Math.max(8, rc.bottom - h - 30) : rc.bottom + 6) + 'px';
+}
+function acAccept(i) {
+  const it = AC.items[i], el = AC.el; if (!it || !el) return;
+  let head = el.textContent.replace(/\u00a0/g, ' ').slice(0, AC.from);
+  if (/[-–—]$/.test(head)) head += ' ';
+  setText(el, head + it.ins); setCaret(el, el.textContent.length);
+  AC.key = ''; scheduleSync(true); acUpdate();
+}
+function acKey(e) {
+  if (!AC.items.length || $('#acpop')?.hidden) return false;
+  const n = AC.items.length;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); AC.i = (AC.i + (e.key === 'ArrowDown' ? 1 : n - 1)) % n; AC.nav = true; $$('#acpop [data-ac]').forEach((b, j) => b.classList.toggle('on', j === AC.i)); return true; }
+  if ((e.key === 'Tab' && !e.shiftKey) || (e.key === 'Enter' && (AC.nav || AC.el.textContent.trim()))) { e.preventDefault(); acAccept(AC.i); return true; }
+  if (e.key === 'Escape') { e.preventDefault(); AC.shut = AC.key; acClose(); return true; }
+  return false;
 }
 function onEdPaste(e) {
   e.preventDefault();
@@ -882,7 +1147,11 @@ function syncNow() {
   clearTimeout(syncTimer); syncTimer = null;
   const ed = $('#ed'); if (!ed || !P) return;
   normalizeEditor(ed);
-  const nb = $$(':scope > .el', ed).map(d => ({ id: d.dataset.id, t: d.dataset.t, x: d.textContent.replace(/ /g, ' ').replace(/\n/g, ' ') }));
+  const nb = $$(':scope > .el', ed).map(d => {
+    const b = { id: d.dataset.id, t: d.dataset.t, x: d.textContent.replace(/\u00a0/g, ' ').replace(/\n/g, ' ') };
+    if (b.x.trim() && d.querySelector('b,strong,i,em,u,span,font')) { const h = cleanInline(d); if (/<[biu]>/.test(h)) b.h = h; }
+    return b;
+  });
   const changed = JSON.stringify(nb) !== JSON.stringify(P.blocks);
   if (changed) { P.blocks = nb; save(); } else setSaved('Guardado en este navegador');
   refreshSide();
@@ -945,12 +1214,14 @@ function renderDesglose() {
   app.innerHTML = `<div class="layout"><aside class="side">${sceneList(scenes, { right: x => { const n = Object.values(meta(x.id).bd).reduce((a, v) => a + v.length, 0) + x.chars.length; return n || ''; } })}</aside>
     <section class="main"><div class="main-narrow">
       <div class="row" style="margin-bottom:14px"><h1 class="vt">Desglose</h1><span class="spacer"></span>
+        <button class="btn sm" data-tobudget title="Añade reparto, utilería, vestuario… como conceptos del presupuesto">Pasar al presupuesto →</button>
         <button class="btn ${UI.bdAll ? '' : 'pri'} sm" data-mode="0">Por escena</button><button class="btn ${UI.bdAll ? 'pri' : ''} sm" data-mode="1">Resumen de todo el guion</button></div>
       ${body}</div></section></div>`;
   bindSide(sid => { UI.sid = sid; UI.bdAll = false; renderDesglose(); });
   const main = $('.main');
   main.addEventListener('click', e => {
     const md = e.target.closest('[data-mode]'); if (md) { UI.bdAll = md.dataset.mode === '1'; renderDesglose(); return; }
+    if (e.target.closest('[data-tobudget]')) { bdBudgetDialog(); return; }
     const rm = e.target.closest('[data-rm]');
     if (rm) { meta(UI.sid).bd[rm.dataset.rm].splice(+rm.dataset.i, 1); save(); keepScroll(renderDesglose); }
   });
@@ -1012,6 +1283,60 @@ function bdSummary(scenes) {
   return `<div class="card"><table class="sum"><thead><tr><th style="width:190px">Categoría</th><th>Elemento</th><th style="width:220px">Escenas</th></tr></thead><tbody>
     ${rows.map(r => r.items.map((it, i) => `<tr>${i === 0 ? `<td rowspan="${r.items.length}" style="color:${r.c};font-weight:700">${r.l} <span class="muted">(${r.items.length})</span></td>` : ''}<td>${esc(it.name)}</td><td class="muted">${[...it.sc].join(', ')}</td></tr>`).join('')).join('')}
     </tbody></table></div>`;
+}
+
+/* Del desglose al presupuesto: cada elemento es un concepto en su departamento */
+const BD_BUDGET = { cast: ['Talento / reparto', 'day'], extras: ['Talento / reparto', 'day'], props: ['Arte y escenografía', 'unit'], wardrobe: ['Vestuario y maquillaje', 'unit'],
+  makeup: ['Vestuario y maquillaje', 'day'], art: ['Arte y escenografía', 'unit'], sfx: ['Efectos especiales', 'unit'], vfx: ['Posproducción', 'unit'],
+  vehicles: ['Transporte', 'day'], animals: ['Producción', 'day'], sound: ['Sonido', 'unit'], equip: ['Cámara', 'day'] };
+function bdElements() {
+  const map = new Map();
+  getScenes().forEach(s => BD_CATS.forEach(([k]) => [...(meta(s.id).bd[k] || []), ...(k === 'cast' ? s.chars : [])].forEach(n => {
+    const key = k + ':' + fold(n); if (!fold(n)) return;
+    if (!map.has(key)) map.set(key, { cat: k, name: n, key, sids: new Set() });
+    map.get(key).sids.add(s.id);
+  })));
+  return [...map.values()];
+}
+function bdBudgetDialog() {
+  const els = bdElements(); if (!els.length) return toast('Aún no hay nada en el desglose');
+  const have = new Set(P.budget.depts.flatMap(d => d.items).map(i => i.src).filter(Boolean));
+  const d = $('#dialog');
+  d.innerHTML = `<div class="dialog"><h3>Pasar el desglose al presupuesto</h3>
+    <p class="muted" style="margin:0 0 8px">Cada elemento entra como concepto en su departamento, con valor 0 para que le pongas precio. Lo que ya estaba no se duplica: solo se actualizan las jornadas.</p>
+    <div class="chk-list">${BD_CATS.map(([k, l, c]) => {
+      const n = els.filter(e => e.cat === k); if (!n.length) return '';
+      const nw = n.filter(e => !have.has('bd:' + e.key)).length;
+      return `<label class="chk"><input type="checkbox" data-c="${k}" checked><b style="color:${c}">${l}</b><span class="muted">${n.length} ${nw ? `(${nw} nuevos)` : '(ya están)'} → ${BD_BUDGET[k][0]}</span></label>`;
+    }).join('')}</div>
+    <p class="muted" style="font-size:12px;margin:8px 0 0">Reparto, extras, maquillaje, vehículos, animales y equipo se cuentan por jornada: los días salen del plan de rodaje (si la escena aún no tiene día, cuenta 1).</p>
+    <div class="row"><button class="btn" data-x>Cancelar</button><button class="btn pri" data-ok>Añadir al presupuesto</button></div></div>`;
+  d.hidden = false;
+  d.onclick = e => {
+    if (e.target === d || e.target.closest('[data-x]')) { d.hidden = true; return; }
+    if (!e.target.closest('[data-ok]')) return;
+    const cats = $$('[data-c]', d).filter(x => x.checked).map(x => x.dataset.c);
+    d.hidden = true; if (!cats.length) return;
+    const r = bdToBudget(cats);
+    toast(`${r.added} conceptos nuevos${r.upd ? `, ${r.upd} actualizados` : ''} en el presupuesto`);
+    go('presupuesto');
+  };
+}
+function bdToBudget(cats) {
+  const B = P.budget; let added = 0, upd = 0;
+  const open = renderPresupuesto.open ||= new Set();
+  for (const el of bdElements().filter(e => cats.includes(e.cat))) {
+    const [dname, mode] = BD_BUDGET[el.cat];
+    let d = B.depts.find(x => fold(x.name) === fold(dname));
+    if (!d) { d = { id: uid(), name: dname, items: [] }; B.depts.push(d); }
+    const days = P.days.filter(dy => dy.scenes.some(id => el.sids.has(id))).length;
+    const qty = mode === 'day' ? Math.max(1, days) : 1, src = 'bd:' + el.key;
+    const it = B.depts.flatMap(x => x.items).find(i => i.src === src);
+    if (it) { if (mode === 'day' && num(it.qty) !== qty) { it.qty = qty; upd++; } continue; }
+    d.items.push({ id: uid(), name: fold(BD_CATS.find(c => c[0] === el.cat)[1]) === fold(dname) ? el.name : `${BD_CATS.find(c => c[0] === el.cat)[1]}: ${el.name}`, qty, unit: mode === 'day' ? 'jornada' : 'unidad', cost: 0, actual: 0, src });
+    added++; open.add(d.id);
+  }
+  save(); return { added, upd };
 }
 
 /* ================= PLANOS ================= */
@@ -1078,6 +1403,11 @@ const fmtDur = s => { s = Math.round(s); return s >= 60 ? `${Math.floor(s / 60)}
 
 /* ================= PLAN DE RODAJE ================= */
 function stripClass(s) { return (s.ie === 'EXT' ? 'ext' : 'int') + '-' + (s.night ? 'night' : 'day'); }
+const openShots = new Set();
+function stripShots(s) {
+  return `<div class="strip-shots">${meta(s.id).shots.map((sh, i) => `<div class="ss-row"><b>${shotCode(s, i)}</b><span>${esc(sh.size) || '—'}</span><span class="muted">${esc([sh.lens, sh.move].filter(Boolean).join(' · '))}</span><span class="ss-desc">${esc(sh.desc)}</span><span class="muted">${sh.dur ? esc(sh.dur) + ' s' : ''}</span>${sh.img ? `<span class="ss-th"><img data-img="${sh.img}" alt=""></span>` : '<span></span>'}</div>`).join('')}
+    <button class="btn ghost sm" data-goshot="${s.id}">Editar planos de la escena ${s.num} →</button></div>`;
+}
 function renderRodaje() {
   const scenes = getScenes(); const byId = Object.fromEntries(scenes.map(s => [s.id, s]));
   P.days.forEach(d => d.scenes = d.scenes.filter(id => byId[id]));
@@ -1086,10 +1416,15 @@ function renderRodaje() {
   const dayOpts = sid => `<select class="inp" data-move="${sid}" title="Mover a…"><option value="">Sin asignar</option>${P.days.map((d, i) => `<option value="${d.id}" ${d.scenes.includes(sid) ? 'selected' : ''}>Día ${i + 1}</option>`).join('')}</select>`;
   const strip = s => `<div class="strip ${stripClass(s)}" draggable="true" data-sid="${s.id}">
     <span class="grip">⋮⋮</span><span class="n">${s.num}</span><span>${s.ie || '—'}</span><span class="loc" title="${esc(s.heading)}">${esc(s.loc)}</span>
-    <span class="time-c">${esc(s.time) || '—'}</span><span>${fmtE(s.eighths)}</span><span class="chars">${esc(s.chars.join(', '))}</span>${dayOpts(s.id)}</div>`;
+    <span class="time-c">${esc(s.time) || '—'}</span><span>${fmtE(s.eighths)}</span><span class="chars">${esc(s.chars.join(', '))}</span>
+    ${meta(s.id).shots.length ? `<button class="shots-b ${openShots.has(s.id) ? 'on' : ''}" data-shots="${s.id}" title="Ver los planos de la escena">${meta(s.id).shots.length} planos ${openShots.has(s.id) ? '▴' : '▾'}</button>` : `<button class="shots-b none" data-goshot="${s.id}" title="Añadir planos en la pestaña Planos">+ planos</button>`}
+    ${dayOpts(s.id)}</div>${openShots.has(s.id) ? stripShots(s) : ''}`;
+  const nShots = ids => ids.reduce((a, id) => a + meta(id).shots.length, 0);
   const pages = ids => ids.reduce((a, id) => a + (byId[id]?.eighths || 0), 0);
+  const anyOpen = scenes.some(s => openShots.has(s.id));
   app.innerHTML = `<section class="main"><div class="main-narrow">
     <div class="row" style="margin-bottom:6px"><h1 class="vt">Plan de rodaje</h1><span class="spacer"></span>
+      <button class="btn sm" data-allshots>${anyOpen ? 'Plegar planos' : 'Desplegar planos'}</button>
       <button class="btn sm" data-sortloc>Ordenar sin asignar por locación</button><button class="btn pri" data-addday>+ Día de rodaje</button></div>
     <p class="sub">Arrastra cada tira al día en que se graba (o usa el selector de la derecha). ${scenes.length} escenas · ${fmtE(pages(scenes.map(s => s.id)))} páginas en total.</p>
     <div class="legend" style="margin-bottom:14px"><span style="--sc:#e9e6dc">INT · día</span><span style="--sc:#f5cf3d">EXT · día</span><span style="--sc:#4f7cff">INT · noche</span><span style="--sc:#3fbf7f">EXT · noche</span></div>
@@ -1097,7 +1432,7 @@ function renderRodaje() {
       ${P.days.map((d, i) => `<div class="day" data-day="${d.id}">
         <div class="day-h"><b>Día ${i + 1}</b><input class="inp" type="date" data-date="${d.id}" value="${esc(d.date || '')}">
           <input class="inp" data-dnote="${d.id}" value="${esc(d.note || '')}" placeholder="Locación, llamado, notas…" style="flex:1;min-width:160px">
-          <span class="muted">${d.scenes.length} esc. · ${fmtE(pages(d.scenes))} pág.</span>
+          <span class="muted">${d.scenes.length} esc. · ${fmtE(pages(d.scenes))} pág. · ${nShots(d.scenes)} planos</span>
           <button class="iconbtn" data-dmv="${i}" data-dir="-1" title="Subir día">↑</button><button class="iconbtn" data-dmv="${i}" data-dir="1" title="Bajar día">↓</button>
           <button class="iconbtn" data-delday="${d.id}" title="Borrar día">×</button></div>
         <div class="zone" data-zone="${d.id}">${d.scenes.map(id => strip(byId[id])).join('') || '<div class="empty">Arrastra escenas aquí</div>'}</div>
@@ -1105,6 +1440,7 @@ function renderRodaje() {
       <div class="day"><div class="day-h"><b>Sin asignar</b><span class="muted">${pool.length} escenas</span></div>
         <div class="zone" data-zone="">${pool.map(strip).join('') || '<div class="empty">Todas las escenas tienen día. 🎬</div>'}</div></div>
     </div></div></section>`;
+  hydrate();
   const main = $('.main');
   const moveTo = (sid, dayId, index) => {
     P.days.forEach(d => d.scenes = d.scenes.filter(x => x !== sid));
@@ -1112,6 +1448,11 @@ function renderRodaje() {
     save(); keepScroll(renderRodaje);
   };
   main.addEventListener('click', e => {
+    const sb = e.target.closest('[data-shots]');
+    if (sb) { const id = sb.dataset.shots; openShots.has(id) ? openShots.delete(id) : openShots.add(id); keepScroll(renderRodaje); return; }
+    const gs = e.target.closest('[data-goshot]');
+    if (gs) { UI.sid = gs.dataset.goshot; UI.shotsAll = false; go('planos'); return; }
+    if (e.target.closest('[data-allshots]')) { if (anyOpen) openShots.clear(); else scenes.forEach(s => meta(s.id).shots.length && openShots.add(s.id)); keepScroll(renderRodaje); return; }
     if (e.target.closest('[data-addday]')) { P.days.push({ id: uid(), date: '', note: '', scenes: [] }); save(); keepScroll(renderRodaje); return; }
     if (e.target.closest('[data-sortloc]')) {
       const firstPool = pool.slice().sort((a, b) => a.loc.localeCompare(b.loc) || (a.ie > b.ie ? 1 : -1) || a.night - b.night);
@@ -1168,20 +1509,26 @@ function renderPresupuesto() {
       <label class="muted">Moneda <select class="inp" data-cur style="width:auto;display:inline-block">${Object.keys(CURRENCIES).map(c => `<option ${B.currency === c ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
       <label class="muted">Imprevistos % <input class="inp" type="number" min="0" max="100" data-cont value="${esc(B.contingency)}" style="width:70px;display:inline-block"></label></div>
     <p class="sub">Valor previsto = cantidad × valor unitario. En "Real" apunta lo que de verdad se pagó.</p>
+    <div class="row" style="margin-bottom:12px"><button class="btn sm" data-frombd>← Traer del desglose</button>
+      <button class="btn sm" data-fit title="Ajusta los valores unitarios para que el total quede en el presupuesto inicial">Cuadrar al presupuesto inicial</button>
+      ${B.fitUndo ? '<button class="btn sm" data-unfit>Deshacer el ajuste</button>' : ''}<span class="spacer"></span>
+      <span class="muted" data-k="perday">${perDay(T)}</span></div>
     <div class="kpis">
+      <div class="kpi kpi-in"><span>Presupuesto inicial</span><input class="inp" type="number" min="0" step="any" data-target value="${esc(B.target || '')}" placeholder="¿Cuánto hay para el rodaje?"></div>
       <div class="kpi"><span>Previsto</span><b data-k="plan">${money(T.plan)}</b></div>
       <div class="kpi"><span>Con imprevistos</span><b data-k="total">${money(T.total)}</b></div>
       <div class="kpi"><span>Gastado real</span><b data-k="act">${money(T.act)}</b></div>
       <div class="kpi"><span>Disponible</span><b data-k="left" class="${T.total - T.act < 0 ? 'bad' : 'ok'}">${money(T.total - T.act)}</b></div>
+      <div class="kpi"><span data-k="difl">${fitInfo(T).l}</span><b data-k="dif" class="${fitInfo(T).c}">${fitInfo(T).v}</b><small data-k="difs">${fitInfo(T).s}</small></div>
     </div>
     ${B.depts.map((d, di) => { const t = T.depts[di]; const pct = t.p ? Math.min(100, t.r / t.p * 100) : (t.r ? 100 : 0); return `
     <details class="dept" data-dept="${d.id}" ${open.has(d.id) ? 'open' : ''}>
-      <summary><span class="car">▸</span><span><b>${esc(d.name)}</b> <span class="muted">${d.items.length ? '· ' + d.items.length + ' conceptos' : ''}</span></span>
+      <summary><span class="car">▸</span><span><b>${esc(d.name)}</b> <span class="muted">${d.items.length ? '· ' + d.items.length + ' conceptos' : ''}</span> <span class="muted pct" data-dpct="${d.id}">${T.plan && t.p ? Math.round(t.p / T.plan * 100) + ' %' : ''}</span></span>
         <span class="money" data-dp="${d.id}">${money(t.p)}</span><span class="money act muted" data-dr="${d.id}">${money(t.r)} real</span>
         <span class="bar"><i data-db="${d.id}" class="${t.r > t.p ? 'over' : ''}" style="width:${pct}%"></i></span></summary>
       <div class="items"><table><thead><tr><th>Concepto</th><th class="num" style="width:80px">Cant.</th><th style="width:100px">Unidad</th><th class="num" style="width:140px">Valor unitario</th><th class="num" style="width:130px">Previsto</th><th class="num" style="width:140px">Real</th><th style="width:30px"></th></tr></thead><tbody>
         ${d.items.map((it, ii) => `<tr data-ii="${ii}">
-          <td><input class="inp" data-f="name" value="${esc(it.name)}" placeholder="Ej.: alquiler de cámara"></td>
+          <td><input class="inp ${it.src ? 'bd' : ''}" data-f="name" value="${esc(it.name)}" placeholder="Ej.: alquiler de cámara" ${it.src ? 'title="Viene del desglose"' : ''}></td>
           <td><input class="inp" type="number" min="0" step="any" data-f="qty" value="${esc(it.qty)}"></td>
           <td><input class="inp" data-f="unit" value="${esc(it.unit)}" placeholder="días" list="units"></td>
           <td><input class="inp" type="number" min="0" step="any" data-f="cost" value="${esc(it.cost)}"></td>
@@ -1199,6 +1546,9 @@ function renderPresupuesto() {
   main.addEventListener('toggle', e => { const d = e.target.closest('details.dept'); if (!d) return; d.open ? open.add(d.dataset.dept) : open.delete(d.dataset.dept); }, true);
   const deptOf = el => B.depts.find(d => d.id === el.closest('[data-dept]')?.dataset.dept);
   main.addEventListener('click', e => {
+    if (e.target.closest('[data-frombd]')) { bdBudgetDialog(); return; }
+    if (e.target.closest('[data-fit]')) { fitBudget(); return; }
+    if (e.target.closest('[data-unfit]')) { const m = new Map(B.fitUndo); B.depts.forEach(d => d.items.forEach(it => { if (m.has(it.id)) it.cost = m.get(it.id); })); delete B.fitUndo; save(); keepScroll(renderPresupuesto); toast('Ajuste deshecho'); return; }
     if (e.target.closest('[data-adddept]')) { const d = { id: uid(), name: 'Nuevo departamento', items: [] }; B.depts.push(d); open.add(d.id); save(); keepScroll(renderPresupuesto); return; }
     const d = deptOf(e.target); if (!d) return;
     if (e.target.closest('[data-additem]')) { d.items.push({ id: uid(), name: '', qty: 1, unit: '', cost: 0, actual: 0 }); save(); keepScroll(renderPresupuesto); $(`[data-dept="${d.id}"] tbody tr:last-child input`)?.focus(); }
@@ -1208,6 +1558,7 @@ function renderPresupuesto() {
   main.addEventListener('input', e => {
     const t = e.target;
     if (t.matches('[data-cont]')) B.contingency = num(t.value);
+    else if (t.matches('[data-target]')) B.target = t.value;
     else if (t.matches('[data-dname]')) { const d = deptOf(t); d.name = t.value; t.closest('details').querySelector('summary b').textContent = t.value; }
     else if (t.dataset.f) { const d = deptOf(t); const it = d.items[+t.closest('tr').dataset.ii]; it[t.dataset.f] = t.type === 'number' ? t.value : t.value; }
     else return;
@@ -1219,12 +1570,39 @@ function updateBudget() {
   const T = budgetTotals();
   $('[data-k=plan]').textContent = money(T.plan); $('[data-k=total]').textContent = money(T.total); $('[data-k=act]').textContent = money(T.act);
   const l = $('[data-k=left]'); l.textContent = money(T.total - T.act); l.className = T.total - T.act < 0 ? 'bad' : 'ok';
+  const f = fitInfo(T); $('[data-k=difl]').textContent = f.l; $('[data-k=dif]').textContent = f.v; $('[data-k=dif]').className = f.c; $('[data-k=difs]').textContent = f.s;
+  $('[data-k=perday]').textContent = perDay(T);
+  P.budget.depts.forEach((d, i) => { const c = $(`[data-dpct="${d.id}"]`); if (c) c.textContent = T.plan && T.depts[i].p ? Math.round(T.depts[i].p / T.plan * 100) + ' %' : ''; });
   P.budget.depts.forEach((d, i) => {
     const t = T.depts[i]; const pct = t.p ? Math.min(100, t.r / t.p * 100) : (t.r ? 100 : 0);
     $(`[data-dp="${d.id}"]`).textContent = money(t.p); $(`[data-dr="${d.id}"]`).textContent = money(t.r) + ' real';
     const b = $(`[data-db="${d.id}"]`); b.style.width = pct + '%'; b.classList.toggle('over', t.r > t.p);
     d.items.forEach((it, ii) => { const c = $(`[data-dept="${d.id}"] [data-ip="${ii}"]`); if (c) c.textContent = money(num(it.qty) * num(it.cost)); });
   });
+}
+
+function fitInfo(T) {
+  const tg = num(P.budget.target);
+  if (!tg) return { l: 'Frente al inicial', v: '—', c: '', s: 'Escribe el presupuesto inicial' };
+  const d = tg - T.total, pct = Math.round(T.total / tg * 100);
+  return d < 0 ? { l: 'Faltan', v: money(-d), c: 'bad', s: `El total es el ${pct} % del inicial` } : { l: 'Sobran', v: money(d), c: 'ok', s: `Usado el ${pct} % del inicial` };
+}
+const perDay = T => P.days.length ? `Por día de rodaje: ${money(T.total / P.days.length)} (${P.days.length} días)` : 'Crea los días en Plan de rodaje para ver el costo por día';
+function fitBudget() {
+  const B = P.budget, tg = num(B.target);
+  if (!tg) { toast('Primero escribe el presupuesto inicial'); $('[data-target]')?.focus(); return; }
+  const goal = tg / (1 + num(B.contingency) / 100);
+  const items = B.depts.flatMap(d => d.items), paid = it => num(it.actual) > 0, val = it => num(it.qty) * num(it.cost);
+  const fixed = items.filter(paid).reduce((a, it) => a + val(it), 0), flex = items.filter(it => !paid(it)).reduce((a, it) => a + val(it), 0);
+  if (!flex) return toast('Pon primero precios a los conceptos: no hay valores que ajustar');
+  const f = (goal - fixed) / flex;
+  if (f <= 0) return toast('Lo ya pagado supera el presupuesto inicial');
+  if (Math.abs(f - 1) < .001) return toast('Ya está cuadrado');
+  if (!confirm(`Para que el total (con ${num(B.contingency)} % de imprevistos) quede en ${money(tg)}, los valores unitarios de los conceptos sin pagar ${f < 1 ? 'bajan' : 'suben'} un ${Math.abs(Math.round((f - 1) * 1000) / 10)} %.\n\nLo que ya tiene valor "Real" no se toca. Puedes deshacerlo después.`)) return;
+  const rnd = v => B.currency === 'COP' ? Math.round(v / 100) * 100 : Math.round(v * 100) / 100;
+  B.fitUndo = items.map(it => [it.id, it.cost]);
+  items.filter(it => !paid(it)).forEach(it => it.cost = rnd(num(it.cost) * f));
+  save(); keepScroll(renderPresupuesto); toast('Presupuesto cuadrado al inicial');
 }
 
 /* ================= MOODBOARD (tablero libre) =================
@@ -1801,11 +2179,14 @@ function drawLinkCard(g, it, h, im) {
   g.fillStyle = '#777'; g.font = '500 12px Inter, sans-serif'; g.fillText(ellipsis(it.site || host, it.w - 24), 12, th + 34);
 }
 async function mbExportPng() {
-  mbStopEdit();
-  const cv = mbCv(), board = $('#mbBoard');
-  toast('Preparando la imagen…');
+  mbStopEdit(); toast('Preparando la imagen…');
+  const c = await mbRenderCanvas(mbCv(), $('#mbBoard'), 2);
+  const sc = getScenes().find(x => x.id === MB.sid);
+  c.toBlob(b => { download(`${slug(P.title)}-moodboard${sc ? '-escena-' + sc.num : ''}.png`, b, 'image/png'); toast('Imagen descargada'); }, 'image/png');
+}
+async function mbRenderCanvas(cv, board, S = 2) {
   await document.fonts.ready;
-  const S = 2, c = document.createElement('canvas'); c.width = MB_W * S; c.height = MB_H * S;
+  const c = document.createElement('canvas'); c.width = MB_W * S; c.height = MB_H * S;
   const g = c.getContext('2d'); g.scale(S, S);
   g.fillStyle = MB_BGS[cv.bg]?.c || '#fff'; g.fillRect(0, 0, MB_W, MB_H);
   if (cv.bg === 'paper' || cv.bg === 'kraft') for (let i = 0; i < 14000; i++) { g.fillStyle = `rgba(0,0,0,${Math.random() * .05})`; g.fillRect(Math.random() * MB_W, Math.random() * MB_H, 1.3, 1.3); }
@@ -1816,8 +2197,8 @@ async function mbExportPng() {
   for (const it of cv.items) if (it.type === 'link' && it.thumb && it.mode !== 'compact' && !ims['L' + it.id]) ims['L' + it.id] = await remote(it.thumb);
   for (const it of cv.items) {
     if (it.type === 'slot') continue; // los huecos vacíos no salen en la imagen
-    const el = board.querySelector(`[data-id="${it.id}"]`);
-    const h = it.type === 'text' ? (el?.offsetHeight || 40) : it.h;
+    const el = board?.querySelector(`[data-id="${it.id}"]`);
+    const h = it.type === 'text' ? (el?.offsetHeight || it.h || 40) : it.h;
     g.save(); g.translate(it.x + it.w / 2, it.y + h / 2); g.rotate((it.rot || 0) * Math.PI / 180); g.translate(-it.w / 2, -h / 2);
     if (it.type === 'img' && ims[it.img]) {
       const im = ims[it.img], fr = it.frame || 'none';
@@ -1841,8 +2222,7 @@ async function mbExportPng() {
     else if (it.type === 'link') drawLinkCard(g, it, h, ims['L' + it.id]);
     g.restore();
   }
-  const sc = getScenes().find(x => x.id === MB.sid);
-  c.toBlob(b => { download(`${slug(P.title)}-moodboard${sc ? '-escena-' + sc.num : ''}.png`, b, 'image/png'); toast('Imagen descargada'); }, 'image/png');
+  return c;
 }
 
 /* ================= Ejemplo ================= */
