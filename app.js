@@ -1285,6 +1285,7 @@ function mbItemHTML(it) {
   else if (it.type === 'slot') inner = `<div class="mb-slot"><b>+</b><span>${esc(it.text || 'Imagen')}</span><small>arrastra o haz doble clic</small></div>`;
   else if (it.type === 'color') inner = `<div class="mb-sw" style="background:${it.color};clip-path:${tornCss(it.id)}"></div>${it.label !== false ? `<span class="mb-hex" style="color:${contrastOf(it.color)}">${esc(it.color)}</span>` : ''}`;
   else if (it.type === 'note') inner = `<div class="mb-note"><div class="mb-tx" style="${txStyle(it)}">${esc(it.text)}</div></div>`;
+  else if (it.type === 'link') inner = mbLinkHTML(it);
   else inner = `<div class="mb-tx" style="${txStyle(it)}">${esc(it.text)}</div>`;
   return `<div class="mb-item mb-${it.type}${MB.sel === it.id ? ' sel' : ''}" data-id="${it.id}" style="${st}">${inner}</div>`;
 }
@@ -1367,6 +1368,92 @@ const MB_TPLS = {
   blanco: { label: 'En blanco', build: () => [] }
 };
 
+/* ---------- Enlaces (YouTube, Vimeo, Eye Candy, Pinterest, cualquier web) ---------- */
+const ytId = u => (String(u).match(/(?:youtu\.be\/|youtube(?:-nocookie)?\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|live\/|v\/))([\w-]{11})/) || [])[1];
+const vimeoId = u => (String(u).match(/vimeo\.com\/(?:video\/|channels\/[\w-]+\/)?(\d{6,})/) || [])[1];
+const IMG_URL_RE = /\.(jpe?g|png|gif|webp|avif)(\?|#|$)/i;
+const linkHost = u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return u; } };
+const favicon = u => `https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(linkHost(u))}`;
+function normUrl(t) {
+  t = String(t || '').trim().replace(/^<|>$/g, '');
+  if (!/^https?:\/\//i.test(t) && /^[\w-]+(\.[\w-]+)+(\/\S*)?$/.test(t)) t = 'https://' + t;
+  try { const u = new URL(t); return /^https?:$/.test(u.protocol) ? u.href : null; } catch { return null; }
+}
+const urlsIn = text => String(text || '').split(/\s+/).map(normUrl).filter(Boolean);
+function mbLinkHTML(it) {
+  const host = linkHost(it.url), title = it.title || host;
+  const video = ytId(it.url) || vimeoId(it.url);
+  if (it.mode === 'compact') return `<div class="mb-link compact"><img class="mb-fav" src="${favicon(it.url)}" alt="" referrerpolicy="no-referrer" draggable="false" onerror="this.style.visibility='hidden'"><div class="mb-lt"><b>${esc(title)}</b><span>${esc(host)}</span></div><i class="mb-arrow">${video ? '▶' : '↗'}</i></div>`;
+  return `<div class="mb-link card"><div class="mb-lthumb">${it.thumb ? `<img src="${esc(it.thumb)}" alt="" referrerpolicy="no-referrer" draggable="false" onerror="this.remove()">` : `<span class="mb-lph">${it.loading ? 'Cargando vista previa…' : esc(host)}</span>`}${video ? '<i class="mb-play">▶</i>' : ''}</div>
+    <div class="mb-lmeta"><img class="mb-fav" src="${favicon(it.url)}" alt="" referrerpolicy="no-referrer" draggable="false" onerror="this.style.visibility='hidden'"><div class="mb-lt"><b>${esc(title)}</b><span>${esc(it.site || host)}</span></div></div></div>`;
+}
+// Microlink (gratis, con límite diario) se usa de uno en uno
+let mlQueue = Promise.resolve();
+const microlink = url => (mlQueue = mlQueue.then(async () => {
+  try { const r = await fetch('https://api.microlink.io/?url=' + encodeURIComponent(url)); const j = await r.json(); return j.status === 'success' ? j.data || {} : null; }
+  catch { return null; }
+  finally { await new Promise(res => setTimeout(res, 400)); }
+}));
+const getJson = async u => { try { const r = await fetch(u); return r.ok ? await r.json() : null; } catch { return null; } };
+async function linkMeta(url) {
+  const out = {}; const yt = ytId(url), vm = vimeoId(url);
+  if (IMG_URL_RE.test(url)) return { thumb: url, site: linkHost(url) };
+  if (yt) { // YouTube: miniatura directa y título por su oEmbed
+    out.thumb = `https://i.ytimg.com/vi/${yt}/hqdefault.jpg`; out.site = 'YouTube';
+    const j = await getJson('https://www.youtube.com/oembed?format=json&url=' + encodeURIComponent('https://www.youtube.com/watch?v=' + yt));
+    if (j) { out.title = j.title || ''; out.site = j.author_name ? 'YouTube · ' + j.author_name : 'YouTube'; }
+    return out;
+  }
+  if (vm) { // Vimeo: su oEmbed
+    out.site = 'Vimeo';
+    const j = await getJson('https://vimeo.com/api/oembed.json?width=640&url=' + encodeURIComponent(url));
+    if (j) { out.title = j.title || ''; out.thumb = j.thumbnail_url || ''; if (j.author_name && j.author_name !== 'Vimeo') out.site = 'Vimeo · ' + j.author_name; }
+    return out;
+  }
+  // cualquier otra web: título e imagen con Microlink; si falla, queda solo el enlace
+  const d = await microlink(url);
+  if (d) { out.title = d.title || ''; out.site = d.publisher || ''; out.thumb = d.image?.url || d.logo?.url || ''; }
+  else out.failed = true;
+  return out;
+}
+async function mbFetchLink(it) {
+  const sid = MB.sid; it.loading = true; mbRedrawItem(it);
+  const m = await linkMeta(it.url);
+  const cur = P.canvas?.[sid]?.items.find(x => x.id === it.id) || it;
+  Object.assign(cur, { title: m.title || cur.title || '', site: m.site || cur.site || '', thumb: m.thumb || cur.thumb || '' }); delete cur.loading;
+  if (m.failed && !cur.title) toast('No se pudo traer la vista previa de ' + linkHost(cur.url) + '. Puedes reintentar con ↻ o escribir el título.');
+  save(); if (MB.sid === sid && $(`#mbBoard [data-id="${cur.id}"]`)) mbRedrawItem(cur);
+}
+function mbAddLinks(urls, pt) {
+  urls = [...new Set(urls)].slice(0, 12); if (!urls.length) return;
+  const c = pt || mbCenterPoint(); const made = [];
+  urls.forEach((url, i) => made.push({ id: uid(), type: 'link', url, title: '', site: '', thumb: '', mode: 'card', x: Math.round(c.x - 150 + i * 30), y: Math.round(c.y - 120 + i * 30), w: 300, h: 233, rot: 0 }));
+  mbHist(); mbCv().items.push(...made); MB.sel = made[made.length - 1].id; save(); mbDraw();
+  made.forEach(mbFetchLink);
+}
+function mbLinkDialog() {
+  const d = $('#dialog');
+  d.innerHTML = `<div class="dialog"><h3>Añadir enlaces</h3>
+    <label>Pega uno o varios enlaces (uno por línea): YouTube, Vimeo, Eye Candy, Pinterest, Instagram, cualquier web…</label>
+    <textarea class="inp" id="dLinks" rows="4" placeholder="https://www.youtube.com/watch?v=…"></textarea>
+    <div class="row"><button class="btn" data-x>Cancelar</button><button class="btn pri" data-ok>Añadir</button></div></div>`;
+  d.hidden = false; setTimeout(() => $('#dLinks').focus(), 30);
+  d.onclick = e => {
+    if (e.target === d || e.target.closest('[data-x]')) d.hidden = true;
+    if (e.target.closest('[data-ok]')) { const u = urlsIn($('#dLinks').value); d.hidden = true; if (u.length) mbAddLinks(u); else toast('No encontré ningún enlace válido'); }
+  };
+}
+function mbOpenLink(it) {
+  const yt = ytId(it.url), vm = vimeoId(it.url);
+  if (yt || vm) {
+    const src = yt ? `https://www.youtube-nocookie.com/embed/${yt}?autoplay=1&rel=0` : `https://player.vimeo.com/video/${vm}?autoplay=1`;
+    const lb = $('#lightbox');
+    lb.innerHTML = `<div class="lb-video"><iframe src="${src}" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe><a href="${esc(it.url)}" target="_blank" rel="noopener">Abrir en ${yt ? 'YouTube' : 'Vimeo'} ↗</a></div>`;
+    lb.hidden = false; return;
+  }
+  window.open(it.url, '_blank', 'noopener');
+}
+
 /* ---------- Vista ---------- */
 function renderMoodboard() {
   const scenes = getScenes(); ensureSid(scenes, true);
@@ -1381,7 +1468,7 @@ function renderMoodboard() {
         <b class="mb-title">${s ? s.num + ' · ' + esc(s.heading) : 'Moodboard general'}</b><span class="spacer"></span>
         <button class="btn sm" data-mb="img">+ Imagen</button><button class="btn sm" data-mb="title">+ Título</button>
         <button class="btn sm" data-mb="text">+ Texto</button><button class="btn sm" data-mb="color">+ Color</button>
-        <button class="btn sm" data-mb="note">+ Nota</button><button class="btn sm" data-mb="slot">+ Hueco</button>
+        <button class="btn sm" data-mb="note">+ Nota</button><button class="btn sm" data-mb="slot">+ Hueco</button><button class="btn sm" data-mb="link">+ Enlace</button>
         <select class="inp mb-inl" data-mbsel="tpl" title="Empezar desde una plantilla"><option value="">Plantilla…</option>${Object.entries(MB_TPLS).map(([k, t]) => `<option value="${k}">${t.label}</option>`).join('')}</select>
         <select class="inp mb-inl" data-mbsel="bg" title="Fondo">${Object.entries(MB_BGS).map(([k, b]) => `<option value="${k}" ${cv.bg === k ? 'selected' : ''}>Fondo: ${b.label}</option>`).join('')}</select>
         <button class="btn sm" data-mb="undo" title="Deshacer (Ctrl+Z)">↶</button><button class="btn sm" data-mb="redo" title="Rehacer (Ctrl+Y)">↷</button>
@@ -1400,7 +1487,7 @@ function mbDraw() {
   const board = $('#mbBoard'); if (!board) return;
   const cv = mbCv();
   board.className = `mb-board bg-${cv.bg}`;
-  board.innerHTML = cv.items.map(mbItemHTML).join('') + (cv.items.length ? '' : `<div class="mb-empty"><b>Tablero en blanco</b><span>Elige una plantilla arriba o añade imágenes, títulos, colores y notas.</span></div>`)
+  board.innerHTML = cv.items.map(mbItemHTML).join('') + (cv.items.length ? '' : `<div class="mb-empty"><b>Tablero en blanco</b><span>Elige una plantilla arriba o añade imágenes, títulos, colores, notas y enlaces.</span></div>`)
     + `<div id="mbSel" class="mb-sel" hidden><i class="mb-h mb-rs" data-h="rs" title="Tamaño (Mayús: libre)"></i><i class="mb-h mb-rt" data-h="rt" title="Girar"></i></div>`;
   hydrate(board); mbCtx(); mbSyncSel();
 }
@@ -1509,7 +1596,12 @@ function mbCtx(empty) {
     <input class="inp" data-ctx="text" value="${esc(it.text || '')}" placeholder="Etiqueta" style="width:130px">`;
   else if (it.type === 'color') specific = `<input type="color" data-ctx="color" value="${it.color}"><input class="inp" data-ctx="hex" value="${esc(it.color)}" style="width:96px">
     <label class="muted"><input type="checkbox" data-ctx="label" ${it.label !== false ? 'checked' : ''}> mostrar código</label>`;
-  const names = { text: 'Texto', note: 'Nota', img: 'Imagen', slot: 'Hueco', color: 'Color' };
+  else if (it.type === 'link') specific = `<select class="inp mb-inl" data-ctx="mode"><option value="card" ${it.mode !== 'compact' ? 'selected' : ''}>Vista previa</option><option value="compact" ${it.mode === 'compact' ? 'selected' : ''}>Solo enlace</option></select>
+    <button class="btn sm pri" data-ctxb="open">${ytId(it.url) || vimeoId(it.url) ? '▶ Reproducir' : 'Abrir ↗'}</button>
+    <input class="inp" data-ctx="title" value="${esc(it.title || '')}" placeholder="Título" style="width:180px">
+    <input class="inp" data-ctx="url" value="${esc(it.url)}" placeholder="https://…" style="width:220px">
+    <button class="btn sm" data-ctxb="refresh" title="Volver a buscar la vista previa">↻</button>`;
+  const names = { text: 'Texto', note: 'Nota', img: 'Imagen', slot: 'Hueco', color: 'Color', link: 'Enlace' };
   box.innerHTML = `<b class="mb-kind">${names[it.type]}</b>${specific}<span class="spacer"></span>
     <button class="btn sm" data-ctxb="dup" title="Ctrl+D">Duplicar</button><button class="btn sm" data-ctxb="front">Al frente</button><button class="btn sm" data-ctxb="back">Atrás</button>
     <button class="btn sm" data-ctxb="rot0" title="Quitar el giro">0°</button><button class="btn sm danger" data-ctxb="del" title="Supr">Borrar</button>`;
@@ -1527,12 +1619,15 @@ function mbBind() {
       if (k === 'undo') return mbUndo(false);
       if (k === 'redo') return mbUndo(true);
       if (k === 'png') return mbExportPng();
+      if (k === 'link') return mbLinkDialog();
       return mbNew(k);
     }
     const c = e.target.closest('[data-ctxb]'); if (!c) return;
     const it = mbFind(MB.sel); if (!it) return; const items = mbCv().items; const k = c.dataset.ctxb;
     if (k === 'edit') { const el = $(`#mbBoard [data-id="${it.id}"]`); return mbEdit(el, it); }
     if (k === 'replace') return mbReplaceImg(it);
+    if (k === 'open') return mbOpenLink(it);
+    if (k === 'refresh') return mbFetchLink(it);
     if (k === 'view') { const src = await imgGet(it.img); const lb = $('#lightbox'); lb.innerHTML = `<img src="${src}" alt="">`; lb.hidden = false; return; }
     mbHist();
     if (k === 'align') it.align = c.dataset.v;
@@ -1549,6 +1644,8 @@ function mbBind() {
     const k = t.dataset.ctx;
     if (k === 'size') it.size = Math.max(8, Math.min(200, num(t.value) || 20));
     else if (k === 'label') it.label = t.checked;
+    else if (k === 'mode') { it.mode = t.value; if (it.mode === 'compact') it.h = 58; else { it.w = Math.max(it.w, 240); it.h = Math.round(it.w * 9 / 16 + 64); } }
+    else if (k === 'url') { const u = normUrl(t.value); if (!u) return; it.url = u; if (e.type === 'change') { it.title = ''; it.thumb = ''; save(); return mbFetchLink(it); } }
     else if (k === 'hex') { const v = t.value.trim(); if (/^#?[0-9a-f]{6}$/i.test(v)) it.color = v[0] === '#' ? v.toLowerCase() : '#' + v.toLowerCase(); else return; }
     else it[k] = t.value;
     save(); mbRedrawItem(it);
@@ -1608,13 +1705,15 @@ function mbBind() {
     const el = e.target.closest('.mb-item'); if (!el) return; const it = mbFind(el.dataset.id); if (!it) return;
     if (it.type === 'text' || it.type === 'note') mbEdit(el, it);
     else if (it.type === 'img' || it.type === 'slot') mbReplaceImg(it);
+    else if (it.type === 'link') mbOpenLink(it);
   });
   // soltar archivos: sobre un hueco lo rellena; si no, se colocan donde caen
-  stage.addEventListener('dragover', e => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); stage.classList.add('over'); } });
+  stage.addEventListener('dragover', e => { const ty = [...e.dataTransfer.types]; if (ty.includes('Files') || ty.includes('text/uri-list')) { e.preventDefault(); stage.classList.add('over'); } });
   stage.addEventListener('dragleave', e => { if (!stage.contains(e.relatedTarget)) stage.classList.remove('over'); });
   stage.addEventListener('drop', e => {
     e.preventDefault(); stage.classList.remove('over');
-    const files = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/')); if (!files.length) return;
+    const files = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/'));
+    if (!files.length) { const u = urlsIn((e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain')).split('\n').filter(l => !l.startsWith('#')).join(' ')); if (u.length) mbAddLinks(u, mbPoint(e)); return; }
     const slotEl = document.elementsFromPoint(e.clientX, e.clientY).map(n => n.closest?.('.mb-slot')?.closest('.mb-item')).find(Boolean);
     const slot = slotEl && mbFind(slotEl.dataset.id);
     if (slot) { mbFillSlot(slot, files[0]); if (files.length > 1) mbAddImages(files.slice(1), mbPoint(e)); }
@@ -1640,7 +1739,7 @@ document.addEventListener('keydown', e => {
   }
 });
 document.addEventListener('paste', e => {
-  if (!P || UI.view !== 'moodboard' || !$('#mbBoard') || MB.editing || e.target.closest('input,textarea')) return;
+  if (!P || UI.view !== 'moodboard' || !$('#mbBoard') || MB.editing || e.target.closest?.('input,textarea')) return;
   const files = [...(e.clipboardData?.items || [])].filter(i => i.type.startsWith('image/')).map(i => i.getAsFile()).filter(Boolean);
   if (files.length) {
     e.preventDefault();
@@ -1649,9 +1748,10 @@ document.addEventListener('paste', e => {
     return;
   }
   const text = e.clipboardData?.getData('text/plain')?.trim();
+  if (text && text.split(/\s+/).every(w => normUrl(w) && /[./]/.test(w))) { e.preventDefault(); return mbAddLinks(urlsIn(text)); }
   if (text) { e.preventDefault(); const c = mbCenterPoint(); mbAdd({ id: uid(), type: 'text', text: text.slice(0, 600), x: Math.round(c.x - 160), y: Math.round(c.y - 20), w: 320, h: 40, rot: 0, font: 'sans', size: 20, color: '#2b2b2b', align: 'left' }); }
 });
-$('#lightbox').addEventListener('click', () => $('#lightbox').hidden = true);
+$('#lightbox').addEventListener('click', e => { if (e.target.closest('a')) return; const lb = $('#lightbox'); lb.hidden = true; lb.innerHTML = ''; });
 
 /* ---------- Descargar como imagen ---------- */
 function tornPath(g, id, w, h) {
@@ -1677,6 +1777,29 @@ function drawTextBlock(g, it, x0, y0, w) {
     g.fillText(line.trimEnd(), ax, y); y += lh;
   }
 }
+function rrect(g, x, y, w, h, r) { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); }
+function drawLinkCard(g, it, h, im) {
+  const host = linkHost(it.url), title = it.title || host, video = ytId(it.url) || vimeoId(it.url);
+  g.save(); g.shadowColor = 'rgba(0,0,0,.18)'; g.shadowBlur = 12; g.shadowOffsetY = 4; rrect(g, 0, 0, it.w, h, 10); g.fillStyle = '#fff'; g.fill(); g.restore();
+  const ellipsis = (txt, max) => { if (g.measureText(txt).width <= max) return txt; while (txt.length > 1 && g.measureText(txt + '…').width > max) txt = txt.slice(0, -1); return txt + '…'; };
+  if (it.mode === 'compact') {
+    g.fillStyle = '#1b1b1b'; g.font = '700 15px Inter, sans-serif'; g.textBaseline = 'top'; g.textAlign = 'left';
+    g.fillText(ellipsis(title, it.w - 60), 14, h / 2 - 17);
+    g.fillStyle = '#777'; g.font = '500 12px Inter, sans-serif'; g.fillText(ellipsis(host, it.w - 60), 14, h / 2 + 3);
+    g.fillStyle = '#999'; g.font = '600 16px Inter, sans-serif'; g.textAlign = 'right'; g.fillText(video ? '▶' : '↗', it.w - 12, h / 2 - 9);
+    return;
+  }
+  const th = Math.max(20, h - 64);
+  g.save(); rrect(g, 0, 0, it.w, h, 10); g.clip();
+  g.fillStyle = '#e7e4dd'; g.fillRect(0, 0, it.w, th);
+  if (im) drawCover(g, im, 0, 0, it.w, th);
+  else { g.fillStyle = '#8d877b'; g.font = '600 14px Inter, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(host, it.w / 2, th / 2); }
+  g.restore();
+  if (video) { g.fillStyle = 'rgba(0,0,0,.6)'; g.beginPath(); g.arc(it.w / 2, th / 2, 24, 0, 7); g.fill(); g.fillStyle = '#fff'; g.beginPath(); g.moveTo(it.w / 2 - 8, th / 2 - 12); g.lineTo(it.w / 2 + 13, th / 2); g.lineTo(it.w / 2 - 8, th / 2 + 12); g.closePath(); g.fill(); }
+  g.fillStyle = '#1b1b1b'; g.font = '700 15px Inter, sans-serif'; g.textBaseline = 'top'; g.textAlign = 'left';
+  g.fillText(ellipsis(title, it.w - 24), 12, th + 12);
+  g.fillStyle = '#777'; g.font = '500 12px Inter, sans-serif'; g.fillText(ellipsis(it.site || host, it.w - 24), 12, th + 34);
+}
 async function mbExportPng() {
   mbStopEdit();
   const cv = mbCv(), board = $('#mbBoard');
@@ -1688,6 +1811,9 @@ async function mbExportPng() {
   if (cv.bg === 'paper' || cv.bg === 'kraft') for (let i = 0; i < 14000; i++) { g.fillStyle = `rgba(0,0,0,${Math.random() * .05})`; g.fillRect(Math.random() * MB_W, Math.random() * MB_H, 1.3, 1.3); }
   const ims = {};
   for (const it of cv.items) if (it.type === 'img' && it.img && !ims[it.img]) { try { ims[it.img] = await loadImgEl(await imgGet(it.img)); } catch { } }
+  // miniaturas de enlaces: solo si la web lo permite (si no, la tarjeta sale sin imagen)
+  const remote = src => new Promise(res => { const im = new Image(); im.crossOrigin = 'anonymous'; im.referrerPolicy = 'no-referrer'; im.onload = () => res(im); im.onerror = () => res(null); im.src = src; setTimeout(() => res(null), 8000); });
+  for (const it of cv.items) if (it.type === 'link' && it.thumb && it.mode !== 'compact' && !ims['L' + it.id]) ims['L' + it.id] = await remote(it.thumb);
   for (const it of cv.items) {
     if (it.type === 'slot') continue; // los huecos vacíos no salen en la imagen
     const el = board.querySelector(`[data-id="${it.id}"]`);
@@ -1712,6 +1838,7 @@ async function mbExportPng() {
       g.save(); g.shadowColor = 'rgba(0,0,0,.18)'; g.shadowBlur = 10; g.shadowOffsetY = 4; g.fillStyle = '#fbe58a'; g.fillRect(0, 0, it.w, h); g.restore();
       g.save(); g.beginPath(); g.rect(0, 0, it.w, h); g.clip(); drawTextBlock(g, it, 14, 14, it.w - 28); g.restore();
     } else if (it.type === 'text') drawTextBlock(g, it, 0, 0, it.w);
+    else if (it.type === 'link') drawLinkCard(g, it, h, ims['L' + it.id]);
     g.restore();
   }
   const sc = getScenes().find(x => x.id === MB.sid);
