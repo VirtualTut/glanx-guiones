@@ -24,8 +24,13 @@ function download(name, data, mime = 'text/plain') {
 }
 function pickFiles(accept, multiple = false) {
   return new Promise(res => {
+    // el input va dentro de la página: si queda suelto, algunos navegadores lo descartan y no avisan al elegir el archivo
     const i = document.createElement('input'); i.type = 'file'; i.accept = accept; i.multiple = multiple;
-    i.onchange = () => res([...i.files]); i.click();
+    i.style.cssText = 'position:fixed;left:-9999px;opacity:0'; document.body.appendChild(i);
+    const done = files => { i.remove(); res(files); };
+    i.addEventListener('change', () => done([...i.files]));
+    i.addEventListener('cancel', () => done([]));
+    i.click();
   });
 }
 const fmtDate = t => new Date(t).toLocaleString('es-CO', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -589,6 +594,7 @@ async function cloneProject(src, title) {
 }
 async function importFile(f) {
   const name = f.name.replace(/\.[^.]+$/, '');
+  toast(`Importando «${f.name}»…`);
   try {
     if (/\.doc$/i.test(f.name)) throw new Error('Los .doc antiguos de Word no se pueden leer. Ábrelo en Word o Google Docs y guárdalo como .docx o PDF.');
     if (/\.(pdf|docx)$/i.test(f.name)) {
