@@ -619,6 +619,7 @@ function askPersist() { try { navigator.storage?.persist?.(); } catch {} }
 function imageRefs(p) {
   const refs = [];
   Object.values(p.boards || {}).forEach(arr => arr.forEach(it => it.img && refs.push(it)));
+  Object.values(p.canvas || {}).forEach(cv => (cv.items || []).forEach(it => it.img && refs.push(it)));
   Object.values(p.scenes || {}).forEach(m => (m.shots || []).forEach(s => s.img && refs.push(s)));
   return refs;
 }
@@ -1226,43 +1227,496 @@ function updateBudget() {
   });
 }
 
-/* ================= MOODBOARD ================= */
+/* ================= MOODBOARD (tablero libre) =================
+   Cada escena (y el proyecto, «General») tiene un tablero de 1600×900 donde se colocan libremente
+   imágenes, títulos, textos, colores, notas y huecos para imágenes. Plantillas o tablero en blanco. */
+const MB_W = 1600, MB_H = 900;
+const MB_FONTS = {
+  marker: { label: 'Marcador', css: "'Permanent Marker', cursive", w: 400 },
+  hand: { label: 'Manuscrita', css: "'Caveat', cursive", w: 600 },
+  sans: { label: 'Sans', css: "'Inter', sans-serif", w: 500 },
+  sansb: { label: 'Sans negrita', css: "'Inter', sans-serif", w: 800 },
+  serif: { label: 'Serif', css: "'Playfair Display', serif", w: 600 },
+  type: { label: 'Máquina', css: "'Courier Prime', monospace", w: 400 }
+};
+const MB_BGS = { paper: { label: 'Papel', c: '#f1efea' }, white: { label: 'Blanco', c: '#ffffff' }, kraft: { label: 'Kraft', c: '#cdb48d' }, dark: { label: 'Negro', c: '#161616' } };
+const MB_FRAMES = { none: 'Sin marco', white: 'Marco blanco', torn: 'Borde rasgado', tape: 'Con cinta' };
+const MB_PALETTE = ['#efeee8', '#282828', '#ba3f1e', '#cd711c', '#5b6b2e', '#2f4b6e', '#d9b48f', '#8a2f3c'];
+const MB = { sid: null, sel: null, scale: 1, hist: [], fut: [], histSid: null, editing: null };
+
+function mbBoard(sid) {
+  P.canvas ||= {};
+  if (!P.canvas[sid]) {
+    const cv = { bg: 'paper', items: [] };
+    // tableros de la versión anterior (cuadrícula de imágenes): se colocan en el tablero
+    const old = P.boards?.[sid] || [];
+    old.forEach((it, i) => cv.items.push({ id: uid(), type: 'img', img: it.img, x: 40 + (i % 5) * 310, y: 40 + Math.floor(i / 5) * 270, w: 290, h: 230, rot: 0, frame: 'white' }));
+    if (old.length) delete P.boards[sid];
+    P.canvas[sid] = cv;
+  }
+  return P.canvas[sid];
+}
+const mbCv = () => mbBoard(MB.sid);
+const mbFind = id => mbCv().items.find(i => i.id === id);
+
+/* bordes rasgados: polígono irregular, siempre igual para el mismo elemento */
+function tornPts(id, n = 10, amp = 2.4) {
+  let seed = [...id].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+  const pts = [];
+  for (let i = 0; i <= n; i++) pts.push([i / n * 100, rnd() * amp]);
+  for (let i = 1; i <= n; i++) pts.push([100 - rnd() * amp, i / n * 100]);
+  for (let i = n - 1; i >= 0; i--) pts.push([i / n * 100, 100 - rnd() * amp]);
+  for (let i = n - 1; i >= 1; i--) pts.push([rnd() * amp, i / n * 100]);
+  return pts;
+}
+const tornCss = id => `polygon(${tornPts(id).map(([x, y]) => x.toFixed(1) + '% ' + y.toFixed(1) + '%').join(',')})`;
+function contrastOf(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || ''); if (!m) return '#1b1b1b';
+  const n = parseInt(m[1], 16), r = n >> 16 & 255, g = n >> 8 & 255, b = n & 255;
+  return (.299 * r + .587 * g + .114 * b) / 255 > .58 ? '#1b1b1b' : '#ffffff';
+}
+const txStyle = it => { const f = MB_FONTS[it.font] || MB_FONTS.sans; return `font-family:${f.css};font-weight:${f.w};font-size:${it.size || 20}px;color:${it.color || '#1b1b1b'};text-align:${it.align || 'left'}`; };
+
+function mbItemHTML(it) {
+  const st = `left:${it.x}px;top:${it.y}px;width:${it.w}px;${it.type === 'text' ? '' : `height:${it.h}px;`}transform:rotate(${it.rot || 0}deg)`;
+  let inner = '';
+  if (it.type === 'img') inner = `<div class="mb-frame f-${it.frame || 'none'}"${it.frame === 'torn' ? ` style="clip-path:${tornCss(it.id)}"` : ''}><img data-img="${it.img}" alt="" draggable="false"></div>${it.frame === 'tape' ? '<i class="mb-tape"></i>' : ''}`;
+  else if (it.type === 'slot') inner = `<div class="mb-slot"><b>+</b><span>${esc(it.text || 'Imagen')}</span><small>arrastra o haz doble clic</small></div>`;
+  else if (it.type === 'color') inner = `<div class="mb-sw" style="background:${it.color};clip-path:${tornCss(it.id)}"></div>${it.label !== false ? `<span class="mb-hex" style="color:${contrastOf(it.color)}">${esc(it.color)}</span>` : ''}`;
+  else if (it.type === 'note') inner = `<div class="mb-note"><div class="mb-tx" style="${txStyle(it)}">${esc(it.text)}</div></div>`;
+  else inner = `<div class="mb-tx" style="${txStyle(it)}">${esc(it.text)}</div>`;
+  return `<div class="mb-item mb-${it.type}${MB.sel === it.id ? ' sel' : ''}" data-id="${it.id}" style="${st}">${inner}</div>`;
+}
+function mbPlace(el, it) {
+  el.style.left = it.x + 'px'; el.style.top = it.y + 'px'; el.style.width = it.w + 'px';
+  if (it.type !== 'text') el.style.height = it.h + 'px';
+  el.style.transform = `rotate(${it.rot || 0}deg)`;
+  mbSyncSel();
+}
+/* marco de selección con tiradores, siempre por encima de todo */
+function mbSyncSel() {
+  const box = $('#mbSel'); if (!box) return;
+  const it = mbFind(MB.sel); const el = it && $(`#mbBoard [data-id="${it.id}"]`);
+  if (!el) { box.hidden = true; return; }
+  box.hidden = false;
+  box.style.left = it.x + 'px'; box.style.top = it.y + 'px'; box.style.width = it.w + 'px';
+  box.style.height = (it.type === 'text' ? el.offsetHeight : it.h) + 'px';
+  box.style.transform = `rotate(${it.rot || 0}deg)`;
+  box.classList.toggle('editing', MB.editing === it.id);
+}
+
+/* ---------- Plantillas ---------- */
+const mbT = (text, x, y, w, o = {}) => ({ id: uid(), type: 'text', text, x, y, w, h: 40, rot: o.rot || 0, font: o.font || 'sans', size: o.size || 18, color: o.color || '#3a3a3a', align: o.align || 'left' });
+const mbH = (text, x, y, w = 420, o = {}) => mbT(text, x, y, w, { font: 'marker', size: 38, color: '#1b1b1b', ...o });
+// título de la plantilla: cabe en una línea (el marcador ocupa ~0,62 del tamaño por letra)
+const mbTitle = (t, def, x = 340, w = 920) => mbH(t || def, x, 30, w, { size: Math.max(26, Math.min(50, Math.floor(w / (Math.max(8, (t || def).length) * .62)))), align: 'center' });
+const mbS = (x, y, w, h, rot = 0, text = 'Imagen', frame = 'white') => ({ id: uid(), type: 'slot', x, y, w, h, rot, text, frame });
+const mbC = (color, x, y, w, h, rot = 0) => ({ id: uid(), type: 'color', color, x, y, w, h, rot, label: true });
+const mbN = (text, x, y, w = 240, h = 170, rot = 0) => ({ id: uid(), type: 'note', text, x, y, w, h, rot, font: 'hand', size: 28, color: '#2a2a2a' });
+const MB_TPLS = {
+  visual: { label: 'Moodboard visual (collage)', build: t => [
+    mbTitle(t, 'MI MOODBOARD VISUAL'),
+    mbH('FOTOS', 60, 110), mbT('retratos en b/n · luz natural · larga exposición', 60, 160, 440),
+    mbS(50, 205, 230, 265, -2, 'Foto'), mbS(300, 215, 210, 245, 3, 'Foto'),
+    mbH('COLORES', 600, 110), mbT('blanco, negro, cálidos, verde', 600, 160, 400),
+    mbC('#efeee8', 590, 215, 170, 130, -3), mbC('#282828', 740, 205, 150, 150, 2), mbC('#ba3f1e', 870, 240, 150, 140, -2), mbC('#cd711c', 610, 335, 170, 120, 2), mbC('#5b6b2e', 790, 345, 170, 115, -1),
+    mbH('ELEMENTOS', 1100, 110), mbT('recortes, garabatos, objetos', 1100, 160, 420),
+    mbS(1100, 205, 220, 210, -3, 'Recorte', 'none'), mbS(1340, 225, 210, 225, 2, 'Garabato', 'none'),
+    mbH('TIPOGRAFÍA', 60, 500), mbT('manuscrita · sans limpia · máquina', 60, 550, 440),
+    mbT('se siente escrito a mano', 60, 598, 250, { font: 'hand', size: 34, rot: -2, color: '#1b1b1b' }),
+    mbT('Menos es más.\nCuenta una sola cosa.', 60, 705, 270, { font: 'sansb', size: 30, color: '#111' }),
+    mbT('INT. CASA - NOCHE', 330, 610, 210, { font: 'type', size: 20, color: '#1b1b1b' }),
+    mbS(335, 665, 180, 190, 2, 'Muestra'),
+    mbH('TEXTURA', 600, 500), mbT('grano, película, papel', 600, 550, 400),
+    mbS(590, 600, 210, 255, -2, 'Textura', 'torn'), mbS(820, 620, 220, 235, 3, 'Textura', 'tape'),
+    mbH('GRÁFICOS', 1100, 500), mbT('storytelling, mixed media', 1100, 550, 420),
+    mbS(1095, 600, 200, 150, -2, 'Gráfico'), mbS(1320, 590, 230, 175, 2, 'Gráfico'), mbS(1180, 762, 250, 118, -1, 'Gráfico')
+  ] },
+  escena: { label: 'Escena (luz, color, encuadre…)', build: t => [
+    mbTitle(t, 'ESCENA'),
+    mbH('LUZ', 60, 110), mbT('dura o suave · de dónde viene · hora del día', 60, 160, 440),
+    mbS(50, 205, 235, 255, -2, 'Luz'), mbS(305, 220, 205, 235, 2, 'Luz'),
+    mbH('COLOR', 600, 110), mbT('paleta de la escena', 600, 160, 400),
+    mbC('#1f2a36', 590, 215, 180, 140, -2), mbC('#c98b4a', 760, 205, 160, 150, 2), mbC('#6f7f6a', 610, 340, 170, 115, 1), mbC('#e9e1d3', 800, 345, 160, 115, -2),
+    mbH('ENCUADRE', 1100, 110), mbT('planos clave · lentes · movimiento', 1100, 160, 440),
+    mbS(1095, 205, 255, 170, -1, 'Plano 1'), mbS(1330, 265, 225, 165, 2, 'Plano 2'),
+    mbH('LOCACIÓN', 60, 500), mbT('dónde se graba · cómo se ve', 60, 550, 440),
+    mbS(50, 600, 255, 250, -2, 'Locación'), mbS(320, 620, 195, 225, 3, 'Locación'),
+    mbH('VESTUARIO Y ARTE', 600, 500, 460), mbT('ropa · objetos · utilería', 600, 550, 420),
+    mbS(590, 600, 200, 250, -2, 'Vestuario'), mbS(810, 615, 220, 230, 2, 'Objeto', 'tape'),
+    mbH('REFERENCIAS', 1100, 500), mbT('películas, fotogramas, publicidad', 1100, 550, 440),
+    mbS(1095, 600, 240, 150, -2, 'Película'), mbS(1350, 595, 200, 170, 2, 'Película'),
+    mbN('¿Qué tiene que sentir quien la vea?', 1160, 765, 280, 115, -1)
+  ] },
+  personaje: { label: 'Personaje (casting, vestuario…)', build: t => [
+    mbTitle(t, 'PERSONAJE'),
+    mbH('ROSTRO / CASTING', 60, 110, 470), mbT('edad · rasgos · referencias de actores', 60, 160, 440),
+    mbS(50, 205, 225, 270, -2, 'Rostro'), mbS(295, 215, 215, 255, 3, 'Rostro'),
+    mbH('PALETA', 600, 110), mbT('colores que lo definen', 600, 160, 400),
+    mbC('#2b2b2b', 590, 215, 175, 135, -2), mbC('#8a2f3c', 745, 205, 155, 150, 2), mbC('#d9b48f', 615, 340, 170, 115, 1), mbC('#2f4b6e', 800, 345, 160, 115, -2),
+    mbH('VESTUARIO', 1100, 110), mbT('prendas · texturas · desgaste', 1100, 160, 440),
+    mbS(1095, 205, 215, 265, -2, 'Vestuario'), mbS(1330, 220, 215, 250, 2, 'Vestuario'),
+    mbH('ACTITUD', 60, 500), mbT('cómo se mueve, cómo habla', 60, 550, 440),
+    mbN('Lo que quiere:\n\nLo que teme:', 60, 600, 250, 240, -2), mbS(330, 620, 185, 220, 2, 'Gesto'),
+    mbH('ACCESORIOS', 600, 500), mbT('objetos que siempre lleva', 600, 550, 420),
+    mbS(590, 600, 205, 240, -2, 'Objeto', 'torn'), mbS(815, 620, 215, 215, 3, 'Objeto', 'tape'),
+    mbH('REFERENCIAS', 1100, 500), mbT('personajes parecidos en cine o series', 1100, 550, 440),
+    mbS(1095, 600, 235, 160, -2, 'Referencia'), mbS(1345, 595, 205, 175, 2, 'Referencia'), mbS(1170, 770, 240, 110, -1, 'Referencia')
+  ] },
+  blanco: { label: 'En blanco', build: () => [] }
+};
+
+/* ---------- Vista ---------- */
 function renderMoodboard() {
   const scenes = getScenes(); ensureSid(scenes, true);
   const sid = UI.sid; const s = scenes.find(x => x.id === sid);
-  const items = P.boards[sid] ||= [];
-  app.innerHTML = `<div class="layout"><aside class="side">${sceneList(scenes, { general: true, right: x => (P.boards[x.id] || []).length || '' })}</aside>
-    <section class="main"><div class="main-narrow" style="max-width:1300px">
-      <div class="scene-head">${s ? `<span class="num">${s.num}</span><h2>${esc(s.heading)}</h2>` : '<h1 class="vt">Moodboard general</h1>'}<span class="spacer"></span><span class="muted">${items.length} imágenes</span></div>
-      <div class="dropzone" id="dz">Arrastra imágenes aquí, pégalas con <b>Ctrl+V</b> o <u>haz clic para elegirlas</u>.<br><span style="font-size:12px">Sirven los fotogramas de Flow o Higgsfield, capturas de películas, Pinterest…</span></div>
-      <div class="board">${items.map((it, i) => `<div class="mcard" data-i="${i}"><img data-img="${it.img}" alt="${esc(it.cap)}"><input data-cap value="${esc(it.cap)}" placeholder="Nota: luz, color, encuadre…"><button class="del" data-x title="Quitar">×</button></div>`).join('')}</div>
-    </div></section></div>`;
-  hydrate();
-  bindSide(id => { UI.sid = id; renderMoodboard(); });
-  const dz = $('#dz'), main = $('.main');
-  dz.onclick = async () => addImages(await pickFiles('image/*', true));
-  main.addEventListener('dragover', e => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); dz.classList.add('over'); } });
-  main.addEventListener('dragleave', e => { if (!main.contains(e.relatedTarget)) dz.classList.remove('over'); });
-  main.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('over'); addImages([...e.dataTransfer.files]); });
-  main.addEventListener('click', e => {
-    const card = e.target.closest('.mcard'); if (!card) return; const i = +card.dataset.i;
-    if (e.target.closest('[data-x]')) { imgDel(items[i].img).catch(() => {}); items.splice(i, 1); save(); keepScroll(renderMoodboard); }
-    else if (e.target.tagName === 'IMG') { const lb = $('#lightbox'); lb.innerHTML = `<img src="${e.target.src}" alt="">`; lb.hidden = false; }
-  });
-  main.addEventListener('input', e => { if (e.target.matches('[data-cap]')) { items[+e.target.closest('.mcard').dataset.i].cap = e.target.value; save(); } });
+  if (MB.histSid !== sid) { MB.hist = []; MB.fut = []; MB.histSid = sid; MB.sel = null; }
+  MB.sid = sid; MB.editing = null;
+  const cv = mbBoard(sid);
+  app.innerHTML = `<div class="layout"><aside class="side">${sceneList(scenes, { general: true, right: x => P.canvas?.[x.id]?.items.length || '' })}</aside>
+  <section class="main mb-main">
+    <div class="mb-bar">
+      <div class="row">
+        <b class="mb-title">${s ? s.num + ' · ' + esc(s.heading) : 'Moodboard general'}</b><span class="spacer"></span>
+        <button class="btn sm" data-mb="img">+ Imagen</button><button class="btn sm" data-mb="title">+ Título</button>
+        <button class="btn sm" data-mb="text">+ Texto</button><button class="btn sm" data-mb="color">+ Color</button>
+        <button class="btn sm" data-mb="note">+ Nota</button><button class="btn sm" data-mb="slot">+ Hueco</button>
+        <select class="inp mb-inl" data-mbsel="tpl" title="Empezar desde una plantilla"><option value="">Plantilla…</option>${Object.entries(MB_TPLS).map(([k, t]) => `<option value="${k}">${t.label}</option>`).join('')}</select>
+        <select class="inp mb-inl" data-mbsel="bg" title="Fondo">${Object.entries(MB_BGS).map(([k, b]) => `<option value="${k}" ${cv.bg === k ? 'selected' : ''}>Fondo: ${b.label}</option>`).join('')}</select>
+        <button class="btn sm" data-mb="undo" title="Deshacer (Ctrl+Z)">↶</button><button class="btn sm" data-mb="redo" title="Rehacer (Ctrl+Y)">↷</button>
+        <button class="btn sm pri" data-mb="png">Descargar PNG</button>
+      </div>
+      <div class="row mb-ctx" id="mbCtx"></div>
+    </div>
+    <div class="mb-stage" id="mbStage"><div class="mb-wrap" id="mbWrap"><div class="mb-board bg-${cv.bg}" id="mbBoard"></div></div></div>
+    <p class="muted mb-help">Arrastra imágenes desde tu PC o pégalas con Ctrl+V (también sobre un hueco) · doble clic en un texto para escribir · Supr borra · Ctrl+D duplica · Ctrl+Z deshace</p>
+  </section></div>`;
+  bindSide(id => { mbStopEdit(); UI.sid = id; renderMoodboard(); });
+  mbDraw(); mbFit(); mbBind();
+  if (!cv.items.length) mbCtx(true);
 }
-async function addImages(files) {
+function mbDraw() {
+  const board = $('#mbBoard'); if (!board) return;
+  const cv = mbCv();
+  board.className = `mb-board bg-${cv.bg}`;
+  board.innerHTML = cv.items.map(mbItemHTML).join('') + (cv.items.length ? '' : `<div class="mb-empty"><b>Tablero en blanco</b><span>Elige una plantilla arriba o añade imágenes, títulos, colores y notas.</span></div>`)
+    + `<div id="mbSel" class="mb-sel" hidden><i class="mb-h mb-rs" data-h="rs" title="Tamaño (Mayús: libre)"></i><i class="mb-h mb-rt" data-h="rt" title="Girar"></i></div>`;
+  hydrate(board); mbCtx(); mbSyncSel();
+}
+function mbFit() {
+  const stage = $('#mbStage'), wrap = $('#mbWrap'), board = $('#mbBoard'); if (!stage) return;
+  const top = stage.getBoundingClientRect().top;
+  const s = Math.max(.2, Math.min((stage.clientWidth - 4) / MB_W, (innerHeight - top - 46) / MB_H));
+  MB.scale = s;
+  wrap.style.width = MB_W * s + 'px'; wrap.style.height = MB_H * s + 'px';
+  board.style.transform = `scale(${s})`; board.style.setProperty('--inv', 1 / s);
+}
+window.addEventListener('resize', () => { if ($('#mbBoard')) mbFit(); });
+
+function mbHist() { MB.hist.push(JSON.stringify(mbCv())); if (MB.hist.length > 60) MB.hist.shift(); MB.fut = []; }
+function mbUndo(redo) {
+  const from = redo ? MB.fut : MB.hist, to = redo ? MB.hist : MB.fut;
+  if (!from.length) return toast(redo ? 'Nada que rehacer' : 'Nada que deshacer');
+  to.push(JSON.stringify(mbCv())); P.canvas[MB.sid] = JSON.parse(from.pop());
+  if (!mbFind(MB.sel)) MB.sel = null;
+  save(); mbDraw();
+}
+function mbSelect(id) {
+  if (MB.sel === id) return;
+  MB.sel = id;
+  $$('#mbBoard .mb-item').forEach(el => el.classList.toggle('sel', el.dataset.id === id));
+  mbCtx(); mbSyncSel();
+}
+function mbPoint(e) { const r = $('#mbBoard').getBoundingClientRect(); return { x: (e.clientX - r.left) / MB.scale, y: (e.clientY - r.top) / MB.scale }; }
+function mbCenterPoint() {
+  const st = $('#mbStage').getBoundingClientRect(), r = $('#mbBoard').getBoundingClientRect();
+  const cx = (Math.min(st.right, r.right) + Math.max(st.left, r.left)) / 2, cy = (Math.min(st.bottom, r.bottom) + Math.max(st.top, r.top)) / 2;
+  return { x: (cx - r.left) / MB.scale, y: (cy - r.top) / MB.scale };
+}
+function mbAdd(it, edit) {
+  mbHist(); mbCv().items.push(it); MB.sel = it.id; save(); mbDraw();
+  if (edit) { const el = $(`#mbBoard [data-id="${it.id}"]`); if (el) mbEdit(el, it); }
+}
+function mbNew(kind) {
+  const c = mbCenterPoint(); const j = () => Math.round((Math.random() - .5) * 60);
+  const at = (w, h) => ({ x: Math.round(c.x - w / 2) + j(), y: Math.round(c.y - h / 2) + j() });
+  if (kind === 'title') mbAdd({ id: uid(), type: 'text', text: 'TÍTULO', ...at(420, 60), w: 420, h: 60, rot: 0, font: 'marker', size: 44, color: '#1b1b1b', align: 'left' }, true);
+  else if (kind === 'text') mbAdd({ id: uid(), type: 'text', text: 'Escribe aquí', ...at(300, 30), w: 300, h: 30, rot: 0, font: 'sans', size: 20, color: '#2b2b2b', align: 'left' }, true);
+  else if (kind === 'color') { const used = mbCv().items.filter(i => i.type === 'color').map(i => i.color); const col = MB_PALETTE.find(p => !used.includes(p)) || MB_PALETTE[Math.floor(Math.random() * MB_PALETTE.length)]; mbAdd({ id: uid(), type: 'color', color: col, ...at(160, 120), w: 160, h: 120, rot: Math.round((Math.random() - .5) * 6), label: true }); }
+  else if (kind === 'note') mbAdd({ id: uid(), type: 'note', text: 'Nota…', ...at(230, 190), w: 230, h: 190, rot: -2, font: 'hand', size: 28, color: '#2a2a2a' }, true);
+  else if (kind === 'slot') mbAdd({ id: uid(), type: 'slot', text: 'Imagen', ...at(260, 200), w: 260, h: 200, rot: 0, frame: 'white' });
+}
+const loadImgEl = src => new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src; });
+async function mbAddImages(files, pt) {
   files = files.filter(f => f.type.startsWith('image/')); if (!files.length) return;
-  const items = P.boards[UI.sid] ||= []; toast(`Guardando ${files.length} imagen(es)…`);
-  for (const f of files) { try { items.push({ id: uid(), img: await storeImage(f), cap: '' }); } catch { } }
-  save(); keepScroll(renderMoodboard);
+  toast(`Guardando ${files.length} imagen(es)…`);
+  const c = pt || mbCenterPoint(); const added = [];
+  for (const [i, f] of files.entries()) {
+    try {
+      const id = await storeImage(f); const im = await loadImgEl(await imgGet(id));
+      const r = im.height / im.width; const w = Math.round(r > 1 ? 340 / r : 340), h = Math.round(w * r); // lado mayor: 340
+      added.push({ id: uid(), type: 'img', img: id, x: Math.round(c.x - w / 2 + i * 28), y: Math.round(c.y - h / 2 + i * 28), w, h, rot: 0, frame: 'none' });
+    } catch { }
+  }
+  if (!added.length) return;
+  mbHist(); mbCv().items.push(...added); MB.sel = added[added.length - 1].id; save(); mbDraw();
 }
+async function mbFillSlot(it, file) {
+  try {
+    const id = await storeImage(file); mbHist();
+    Object.assign(it, { type: 'img', img: id, frame: it.frame || 'white' }); delete it.text;
+    MB.sel = it.id; save(); mbDraw();
+  } catch (err) { toast(err.message); }
+}
+async function mbReplaceImg(it) { const [f] = await pickFiles('image/*'); if (f) mbFillSlot(it, f); }
+
+function mbEdit(el, it) {
+  const tx = el.querySelector('.mb-tx'); if (!tx) return;
+  mbHist(); MB.editing = it.id; el.classList.add('editing');
+  try { tx.contentEditable = 'plaintext-only'; } catch { tx.contentEditable = 'true'; }
+  if (tx.contentEditable !== 'plaintext-only') tx.contentEditable = 'true';
+  tx.focus();
+  const r = document.createRange(); r.selectNodeContents(tx); const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+  tx.onblur = () => {
+    tx.contentEditable = 'false'; el.classList.remove('editing'); MB.editing = null;
+    const v = tx.innerText.replace(/\n$/, '');
+    if (v !== it.text) { it.text = v; save(); } else MB.hist.pop();
+    mbSyncSel();
+  };
+  tx.onkeydown = ev => { if (ev.key === 'Escape') { ev.preventDefault(); tx.blur(); } ev.stopPropagation(); };
+  tx.oninput = () => mbSyncSel(); mbSyncSel();
+}
+function mbStopEdit() { if (MB.editing) document.activeElement?.blur?.(); }
+
+/* ---------- Barra del elemento seleccionado ---------- */
+function mbCtx(empty) {
+  const box = $('#mbCtx'); if (!box) return;
+  const it = mbFind(MB.sel);
+  if (!it) { box.innerHTML = `<span class="muted">${empty ? 'Empieza con una <b>plantilla</b> (Moodboard visual, Escena, Personaje) o en blanco.' : 'Selecciona un elemento del tablero para editarlo.'}</span>`; return; }
+  const font = () => `<select class="inp mb-inl" data-ctx="font">${Object.entries(MB_FONTS).map(([k, f]) => `<option value="${k}" ${it.font === k ? 'selected' : ''}>${f.label}</option>`).join('')}</select>
+    <input class="inp mb-num" type="number" min="8" max="200" data-ctx="size" value="${it.size || 20}" title="Tamaño de letra">
+    <input type="color" data-ctx="color" value="${it.color || '#1b1b1b'}" title="Color del texto">
+    <span class="mb-seg">${['left', 'center', 'right'].map(a => `<button class="btn sm ${it.align === a ? 'on' : ''}" data-ctxb="align" data-v="${a}">${{ left: '⯇', center: '≡', right: '⯈' }[a]}</button>`).join('')}</span>
+    <button class="btn sm" data-ctxb="edit">Escribir</button>`;
+  let specific = '';
+  if (it.type === 'text') specific = font();
+  else if (it.type === 'note') specific = font();
+  else if (it.type === 'img') specific = `<select class="inp mb-inl" data-ctx="frame">${Object.entries(MB_FRAMES).map(([k, l]) => `<option value="${k}" ${(it.frame || 'none') === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    <button class="btn sm" data-ctxb="replace">Cambiar imagen</button><button class="btn sm" data-ctxb="view">Ver grande</button>`;
+  else if (it.type === 'slot') specific = `<button class="btn sm pri" data-ctxb="replace">Poner imagen</button>
+    <select class="inp mb-inl" data-ctx="frame">${Object.entries(MB_FRAMES).map(([k, l]) => `<option value="${k}" ${(it.frame || 'none') === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    <input class="inp" data-ctx="text" value="${esc(it.text || '')}" placeholder="Etiqueta" style="width:130px">`;
+  else if (it.type === 'color') specific = `<input type="color" data-ctx="color" value="${it.color}"><input class="inp" data-ctx="hex" value="${esc(it.color)}" style="width:96px">
+    <label class="muted"><input type="checkbox" data-ctx="label" ${it.label !== false ? 'checked' : ''}> mostrar código</label>`;
+  const names = { text: 'Texto', note: 'Nota', img: 'Imagen', slot: 'Hueco', color: 'Color' };
+  box.innerHTML = `<b class="mb-kind">${names[it.type]}</b>${specific}<span class="spacer"></span>
+    <button class="btn sm" data-ctxb="dup" title="Ctrl+D">Duplicar</button><button class="btn sm" data-ctxb="front">Al frente</button><button class="btn sm" data-ctxb="back">Atrás</button>
+    <button class="btn sm" data-ctxb="rot0" title="Quitar el giro">0°</button><button class="btn sm danger" data-ctxb="del" title="Supr">Borrar</button>`;
+}
+function mbRedrawItem(it) { const el = $(`#mbBoard [data-id="${it.id}"]`); if (!el) return mbDraw(); const t = document.createElement('template'); t.innerHTML = mbItemHTML(it); const n = t.content.firstChild; el.replaceWith(n); hydrate(n); mbSyncSel(); }
+
+/* ---------- Eventos ---------- */
+function mbBind() {
+  const board = $('#mbBoard'), stage = $('#mbStage'), main = $('.mb-main');
+  main.addEventListener('click', async e => {
+    const b = e.target.closest('[data-mb]');
+    if (b) {
+      const k = b.dataset.mb;
+      if (k === 'img') return mbAddImages(await pickFiles('image/*', true));
+      if (k === 'undo') return mbUndo(false);
+      if (k === 'redo') return mbUndo(true);
+      if (k === 'png') return mbExportPng();
+      return mbNew(k);
+    }
+    const c = e.target.closest('[data-ctxb]'); if (!c) return;
+    const it = mbFind(MB.sel); if (!it) return; const items = mbCv().items; const k = c.dataset.ctxb;
+    if (k === 'edit') { const el = $(`#mbBoard [data-id="${it.id}"]`); return mbEdit(el, it); }
+    if (k === 'replace') return mbReplaceImg(it);
+    if (k === 'view') { const src = await imgGet(it.img); const lb = $('#lightbox'); lb.innerHTML = `<img src="${src}" alt="">`; lb.hidden = false; return; }
+    mbHist();
+    if (k === 'align') it.align = c.dataset.v;
+    else if (k === 'dup') { const n = { ...JSON.parse(JSON.stringify(it)), id: uid(), x: it.x + 24, y: it.y + 24 }; items.push(n); MB.sel = n.id; }
+    else if (k === 'front') { items.splice(items.indexOf(it), 1); items.push(it); }
+    else if (k === 'back') { items.splice(items.indexOf(it), 1); items.unshift(it); }
+    else if (k === 'rot0') it.rot = 0;
+    else if (k === 'del') { items.splice(items.indexOf(it), 1); MB.sel = null; }
+    save(); mbDraw();
+  });
+  main.addEventListener('focusin', e => { if (e.target.closest('[data-ctx]')) mbHist(); });
+  const ctxInput = e => {
+    const t = e.target.closest('[data-ctx]'); if (!t) return; const it = mbFind(MB.sel); if (!it) return;
+    const k = t.dataset.ctx;
+    if (k === 'size') it.size = Math.max(8, Math.min(200, num(t.value) || 20));
+    else if (k === 'label') it.label = t.checked;
+    else if (k === 'hex') { const v = t.value.trim(); if (/^#?[0-9a-f]{6}$/i.test(v)) it.color = v[0] === '#' ? v.toLowerCase() : '#' + v.toLowerCase(); else return; }
+    else it[k] = t.value;
+    save(); mbRedrawItem(it);
+    if (k === 'color' && it.type === 'color') { const h = $('[data-ctx="hex"]'); if (h) h.value = it.color; }
+  };
+  main.addEventListener('input', ctxInput); main.addEventListener('change', e => {
+    const s = e.target.closest('[data-mbsel]');
+    if (s) {
+      const cv = mbCv();
+      if (s.dataset.mbsel === 'bg') { mbHist(); cv.bg = s.value; save(); mbDraw(); }
+      if (s.dataset.mbsel === 'tpl' && s.value) {
+        const tpl = MB_TPLS[s.value]; s.value = '';
+        if (cv.items.length && !confirm(`¿Cambiar el tablero por la plantilla «${tpl.label}»? Lo que hay se quita (puedes deshacer con Ctrl+Z).`)) return;
+        const sc = getScenes().find(x => x.id === MB.sid);
+        mbHist(); cv.items = tpl.build(sc ? sc.heading : (P.title || '').toUpperCase()); MB.sel = null; save(); mbDraw();
+      }
+      return;
+    }
+    ctxInput(e);
+  });
+
+  // mover, cambiar tamaño, girar
+  board.addEventListener('pointerdown', e => {
+    const h = e.target.closest('.mb-h')?.dataset.h;
+    const el = h ? $(`#mbBoard [data-id="${MB.sel}"]`) : e.target.closest('.mb-item');
+    if (!el) { mbStopEdit(); mbSelect(null); return; }
+    if (MB.editing === el.dataset.id && !h) return;
+    mbStopEdit();
+    const it = mbFind(el.dataset.id); if (!it) return;
+    mbSelect(it.id);
+    e.preventDefault();
+    const cap = e.target.closest('.mb-h') || el; cap.setPointerCapture(e.pointerId);
+    const s = MB.scale, sx = e.clientX, sy = e.clientY, o = { x: it.x, y: it.y, w: it.w, h: it.h || el.offsetHeight, rot: it.rot || 0 };
+    const rc = el.getBoundingClientRect(), cx = rc.left + rc.width / 2, cy = rc.top + rc.height / 2;
+    const ratio = o.h / o.w; let moved = false;
+    const mv = ev => {
+      const dx = (ev.clientX - sx) / s, dy = (ev.clientY - sy) / s;
+      if (!moved && Math.hypot(dx, dy) < 3) return;
+      if (!moved) { mbHist(); moved = true; }
+      if (!h) { it.x = Math.round(o.x + dx); it.y = Math.round(o.y + dy); }
+      else if (h === 'rs') {
+        const a = o.rot * Math.PI / 180, lx = dx * Math.cos(a) + dy * Math.sin(a), ly = -dx * Math.sin(a) + dy * Math.cos(a);
+        it.w = Math.max(30, Math.round(o.w + lx));
+        if (it.type !== 'text') it.h = (it.type === 'img') !== ev.shiftKey ? Math.round(it.w * ratio) : Math.max(24, Math.round(o.h + ly));
+      } else if (h === 'rt') {
+        let ang = Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180 / Math.PI + 90;
+        if (ang > 180) ang -= 360;
+        if (Math.abs(ang) < 3) ang = 0;
+        it.rot = Math.round(ang * 10) / 10;
+      }
+      mbPlace(el, it);
+    };
+    const up = () => { cap.removeEventListener('pointermove', mv); cap.removeEventListener('pointerup', up); cap.removeEventListener('pointercancel', up); if (moved) save(); };
+    cap.addEventListener('pointermove', mv); cap.addEventListener('pointerup', up); cap.addEventListener('pointercancel', up);
+  });
+  board.addEventListener('dblclick', e => {
+    const el = e.target.closest('.mb-item'); if (!el) return; const it = mbFind(el.dataset.id); if (!it) return;
+    if (it.type === 'text' || it.type === 'note') mbEdit(el, it);
+    else if (it.type === 'img' || it.type === 'slot') mbReplaceImg(it);
+  });
+  // soltar archivos: sobre un hueco lo rellena; si no, se colocan donde caen
+  stage.addEventListener('dragover', e => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); stage.classList.add('over'); } });
+  stage.addEventListener('dragleave', e => { if (!stage.contains(e.relatedTarget)) stage.classList.remove('over'); });
+  stage.addEventListener('drop', e => {
+    e.preventDefault(); stage.classList.remove('over');
+    const files = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/')); if (!files.length) return;
+    const slotEl = document.elementsFromPoint(e.clientX, e.clientY).map(n => n.closest?.('.mb-slot')?.closest('.mb-item')).find(Boolean);
+    const slot = slotEl && mbFind(slotEl.dataset.id);
+    if (slot) { mbFillSlot(slot, files[0]); if (files.length > 1) mbAddImages(files.slice(1), mbPoint(e)); }
+    else mbAddImages(files, mbPoint(e));
+  });
+}
+document.addEventListener('keydown', e => {
+  if (!P || UI.view !== 'moodboard' || !$('#mbBoard') || MB.editing) return;
+  if (e.target.closest('input,textarea,select,[contenteditable="true"],[contenteditable="plaintext-only"]')) return;
+  const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
+  if (mod && k === 'z') { e.preventDefault(); return mbUndo(e.shiftKey); }
+  if (mod && k === 'y') { e.preventDefault(); return mbUndo(true); }
+  const it = mbFind(MB.sel); if (!it) return;
+  const items = mbCv().items;
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); mbHist(); items.splice(items.indexOf(it), 1); MB.sel = null; save(); mbDraw(); }
+  else if (mod && k === 'd') { e.preventDefault(); mbHist(); const n = { ...JSON.parse(JSON.stringify(it)), id: uid(), x: it.x + 24, y: it.y + 24 }; items.push(n); MB.sel = n.id; save(); mbDraw(); }
+  else if (e.key === 'Escape') mbSelect(null);
+  else if (e.key === 'Enter' && (it.type === 'text' || it.type === 'note')) { e.preventDefault(); mbEdit($(`#mbBoard [data-id="${it.id}"]`), it); }
+  else if (e.key.startsWith('Arrow')) {
+    e.preventDefault(); const d = e.shiftKey ? 10 : 1;
+    if (e.key === 'ArrowLeft') it.x -= d; if (e.key === 'ArrowRight') it.x += d; if (e.key === 'ArrowUp') it.y -= d; if (e.key === 'ArrowDown') it.y += d;
+    mbPlace($(`#mbBoard [data-id="${it.id}"]`), it); save();
+  }
+});
 document.addEventListener('paste', e => {
-  if (!P || UI.view !== 'moodboard' || e.target.closest('input,textarea')) return;
+  if (!P || UI.view !== 'moodboard' || !$('#mbBoard') || MB.editing || e.target.closest('input,textarea')) return;
   const files = [...(e.clipboardData?.items || [])].filter(i => i.type.startsWith('image/')).map(i => i.getAsFile()).filter(Boolean);
-  if (files.length) { e.preventDefault(); addImages(files); }
+  if (files.length) {
+    e.preventDefault();
+    const sel = mbFind(MB.sel);
+    if (sel && sel.type === 'slot') mbFillSlot(sel, files[0]); else mbAddImages(files);
+    return;
+  }
+  const text = e.clipboardData?.getData('text/plain')?.trim();
+  if (text) { e.preventDefault(); const c = mbCenterPoint(); mbAdd({ id: uid(), type: 'text', text: text.slice(0, 600), x: Math.round(c.x - 160), y: Math.round(c.y - 20), w: 320, h: 40, rot: 0, font: 'sans', size: 20, color: '#2b2b2b', align: 'left' }); }
 });
 $('#lightbox').addEventListener('click', () => $('#lightbox').hidden = true);
+
+/* ---------- Descargar como imagen ---------- */
+function tornPath(g, id, w, h) {
+  g.beginPath(); tornPts(id).forEach(([px, py], i) => { const X = px / 100 * w, Y = py / 100 * h; i ? g.lineTo(X, Y) : g.moveTo(X, Y); }); g.closePath();
+}
+function drawCover(g, im, x, y, w, h) {
+  const r = Math.max(w / im.width, h / im.height), sw = w / r, sh = h / r;
+  g.drawImage(im, (im.width - sw) / 2, (im.height - sh) / 2, sw, sh, x, y, w, h);
+}
+function drawTextBlock(g, it, x0, y0, w) {
+  const f = MB_FONTS[it.font] || MB_FONTS.sans, size = it.size || 20, lh = size * 1.15;
+  g.font = `${f.w} ${size}px ${f.css}`; g.fillStyle = it.color || '#1b1b1b'; g.textBaseline = 'top';
+  const align = it.align || 'left'; g.textAlign = align;
+  const ax = align === 'center' ? x0 + w / 2 : align === 'right' ? x0 + w : x0;
+  let y = y0 + (lh - size) / 2;
+  for (const para of String(it.text || '').split('\n')) {
+    let line = '';
+    for (const word of para.split(/(\s+)/)) {
+      const test = line + word;
+      if (g.measureText(test.trimEnd()).width > w && line.trim()) { g.fillText(line.trimEnd(), ax, y); y += lh; line = word.trimStart(); }
+      else line = test;
+    }
+    g.fillText(line.trimEnd(), ax, y); y += lh;
+  }
+}
+async function mbExportPng() {
+  mbStopEdit();
+  const cv = mbCv(), board = $('#mbBoard');
+  toast('Preparando la imagen…');
+  await document.fonts.ready;
+  const S = 2, c = document.createElement('canvas'); c.width = MB_W * S; c.height = MB_H * S;
+  const g = c.getContext('2d'); g.scale(S, S);
+  g.fillStyle = MB_BGS[cv.bg]?.c || '#fff'; g.fillRect(0, 0, MB_W, MB_H);
+  if (cv.bg === 'paper' || cv.bg === 'kraft') for (let i = 0; i < 14000; i++) { g.fillStyle = `rgba(0,0,0,${Math.random() * .05})`; g.fillRect(Math.random() * MB_W, Math.random() * MB_H, 1.3, 1.3); }
+  const ims = {};
+  for (const it of cv.items) if (it.type === 'img' && it.img && !ims[it.img]) { try { ims[it.img] = await loadImgEl(await imgGet(it.img)); } catch { } }
+  for (const it of cv.items) {
+    if (it.type === 'slot') continue; // los huecos vacíos no salen en la imagen
+    const el = board.querySelector(`[data-id="${it.id}"]`);
+    const h = it.type === 'text' ? (el?.offsetHeight || 40) : it.h;
+    g.save(); g.translate(it.x + it.w / 2, it.y + h / 2); g.rotate((it.rot || 0) * Math.PI / 180); g.translate(-it.w / 2, -h / 2);
+    if (it.type === 'img' && ims[it.img]) {
+      const im = ims[it.img], fr = it.frame || 'none';
+      if (fr === 'white') {
+        const pad = it.w * .04;
+        g.save(); g.shadowColor = 'rgba(0,0,0,.2)'; g.shadowBlur = 16; g.shadowOffsetY = 5; g.fillStyle = '#fff'; g.fillRect(0, 0, it.w, h); g.restore();
+        drawCover(g, im, pad, pad, it.w - pad * 2, h - pad * 2);
+      } else if (fr === 'torn') { tornPath(g, it.id, it.w, h); g.clip(); drawCover(g, im, 0, 0, it.w, h); }
+      else {
+        g.save(); g.shadowColor = 'rgba(0,0,0,.14)'; g.shadowBlur = 10; g.shadowOffsetY = 3; g.fillStyle = '#ddd'; g.fillRect(0, 0, it.w, h); g.restore();
+        drawCover(g, im, 0, 0, it.w, h);
+        if (fr === 'tape') { g.save(); g.translate(it.w * .5, 1); g.rotate(-3 * Math.PI / 180); g.fillStyle = 'rgba(240,234,214,.8)'; g.fillRect(-it.w * .18, -13, it.w * .36, 26); g.restore(); }
+      }
+    } else if (it.type === 'color') {
+      g.save(); g.shadowColor = 'rgba(0,0,0,.18)'; g.shadowBlur = 8; g.shadowOffsetY = 3; tornPath(g, it.id, it.w, h); g.fillStyle = it.color; g.fill(); g.restore();
+      if (it.label !== false) { g.fillStyle = contrastOf(it.color); g.font = '600 13px Inter, sans-serif'; g.textBaseline = 'top'; g.textAlign = 'left'; g.fillText(it.color, 10, 9); }
+    } else if (it.type === 'note') {
+      g.save(); g.shadowColor = 'rgba(0,0,0,.18)'; g.shadowBlur = 10; g.shadowOffsetY = 4; g.fillStyle = '#fbe58a'; g.fillRect(0, 0, it.w, h); g.restore();
+      g.save(); g.beginPath(); g.rect(0, 0, it.w, h); g.clip(); drawTextBlock(g, it, 14, 14, it.w - 28); g.restore();
+    } else if (it.type === 'text') drawTextBlock(g, it, 0, 0, it.w);
+    g.restore();
+  }
+  const sc = getScenes().find(x => x.id === MB.sid);
+  c.toBlob(b => { download(`${slug(P.title)}-moodboard${sc ? '-escena-' + sc.num : ''}.png`, b, 'image/png'); toast('Imagen descargada'); }, 'image/png');
+}
 
 /* ================= Ejemplo ================= */
 function sampleProject() {
