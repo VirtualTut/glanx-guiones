@@ -186,7 +186,278 @@ function parseFDX(xml) {
   return $$('FinalDraft > Content > Paragraph', doc).map(p => ({ id: uid(), t: map[p.getAttribute('Type')] || 'action', x: $$('Text', p).map(t => t.textContent).join('') }))
     .filter(b => b.x.trim());
 }
-const upT = b => ['scene', 'character', 'transition'].includes(b.t) ? b.x.toUpperCase() : b.x;
+/* ================= Importar PDF / Word (.docx) ================= */
+const LIBS = {
+  pdf: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
+  pdfWorker: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
+  zip: 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'
+};
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    if (document.querySelector(`script[src="${src}"]`)) return res();
+    const s = document.createElement('script'); s.src = src; s.onload = res;
+    s.onerror = () => rej(new Error('No se pudo cargar el lector de archivos (revisa la conexión a internet).'));
+    document.head.appendChild(s);
+  });
+}
+const cleanTxt = s => String(s || '').replace(/[​‌‍﻿]/g, '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
+const modeOf = arr => { const m = new Map(); let best = null, n = 0; arr.forEach(v => { const c = (m.get(v) || 0) + 1; m.set(v, c); if (c > n) { n = c; best = v; } }); return best; };
+const NUM_RE = /^\s*\d+[A-Z]?\.?\s*$/;
+const CONT_RE = /^\(?(CONTINUED|CONTINÚA|CONTINUA|CONTINÚA:|MORE|MÁS|MAS|CONT'D|CONT\.|SIGUE)\)?:?$/i;
+
+function joinItems(items) {
+  items = items.slice().sort((a, b) => a.x - b.x);
+  let text = '', end = null, x = null;
+  for (const it of items) {
+    if (x === null && it.s.trim()) x = it.x;
+    if (end !== null && it.x - end > 1.5 && !/\s$/.test(text) && !/^\s/.test(it.s)) text += ' ';
+    text += it.s; end = it.x + it.w;
+  }
+  return { text, x: x ?? items[0]?.x ?? 0, xEnd: end ?? 0 };
+}
+async function pdfLines(buf, onPage) {
+  await loadScript(LIBS.pdf);
+  pdfjsLib.GlobalWorkerOptions.workerSrc = LIBS.pdfWorker;
+  const doc = await pdfjsLib.getDocument({ data: buf }).promise;
+  const lines = [];
+  for (let pn = 1; pn <= doc.numPages; pn++) {
+    onPage?.(pn, doc.numPages);
+    const page = await doc.getPage(pn);
+    try { await page.getOperatorList(); } catch { } // carga las fuentes para saber cuáles son negrita
+    const tc = await page.getTextContent();
+    const boldCache = {};
+    const isBold = fn => {
+      if (fn in boldCache) return boldCache[fn];
+      let b = false; try { const f = page.commonObjs.get(fn); b = !!(f && (f.bold || /bold|black|heavy|semibold|demi/i.test(f.name || ''))); } catch { }
+      return boldCache[fn] = b;
+    };
+    const rows = [];
+    for (const it of tc.items) {
+      if (!('str' in it) || !cleanTxt(it.str)) continue;
+      const [a, b, c, d, x, y] = it.transform; const size = Math.hypot(c, d) || it.height || 12;
+      let row = rows.find(r => Math.abs(r.y - y) < Math.max(2, size * .3));
+      if (!row) { row = { y, items: [] }; rows.push(row); }
+      row.items.push({ x, w: it.width, s: it.str, size, bold: isBold(it.fontName) });
+    }
+    rows.sort((a, b) => b.y - a.y).forEach(r => {
+      const tot = r.items.reduce((s, it) => s + cleanTxt(it.s).length, 0) || 1;
+      lines.push({ page: pn, y: r.y, items: r.items,
+        size: r.items.reduce((s, it) => s + it.size * cleanTxt(it.s).length, 0) / tot,
+        bold: r.items.filter(it => it.bold).reduce((s, it) => s + cleanTxt(it.s).length, 0) >= tot * .8 });
+    });
+    page.cleanup();
+  }
+  return lines;
+}
+/* Líneas del PDF → párrafos con sangría (en pulgadas desde el margen izquierdo) */
+function pdfParas(lines) {
+  const pre = lines.map(l => ({ ...l, ...joinItems(l.items) }));
+  const margin = modeOf(pre.filter(l => cleanTxt(l.text).length > 25).map(l => Math.round(l.x))) ?? Math.min(...pre.map(l => l.x));
+  const ends = pre.map(l => l.xEnd).sort((a, b) => a - b); const right = ends[Math.floor(ends.length * .95)] || 0;
+  const out = []; let prev = null;
+  for (const l of pre) {
+    // números de escena en los márgenes y números de página
+    const sortedIt = l.items.slice().sort((a, b) => a.x - b.x);
+    const items = sortedIt.filter((it, i) => {
+      if (!NUM_RE.test(it.s)) return true;
+      const prevIt = sortedIt.slice(0, i).reverse().find(o => o.s.trim());
+      const isolated = !prevIt || it.x - (prevIt.x + prevIt.w) > 18;
+      return !((it.x < margin - 8 && sortedIt.length > 1) || (it.x > margin + 5.3 * 72 && isolated));
+    });
+    if (!items.length) continue;
+    const j = joinItems(items); const text = cleanTxt(j.text);
+    if (!text || NUM_RE.test(text) || CONT_RE.test(text)) continue;
+    const gap = prev && prev.page === l.page ? prev.y - l.y : Infinity;
+    const blank = gap > l.size * 1.55;
+    const wrap = !blank && prev && prev.xEnd > right - 50 && !/[​]\s*$/.test(prev.raw);
+    const long = j.xEnd > margin + .7 * (right - margin);
+    const p = { text, raw: j.text, ind: (j.x - margin) / 72, size: l.size, bold: l.bold, blank, wrap, gap, long, page: l.page, y: l.y, xEnd: j.xEnd };
+    out.push(p); prev = p;
+  }
+  return out;
+}
+/* Word .docx (también lo que descarga Google Docs) */
+async function docxParas(buf) {
+  await loadScript(LIBS.zip);
+  const zip = await JSZip.loadAsync(buf);
+  const xml = await zip.file('word/document.xml')?.async('string');
+  if (!xml) throw new Error('No parece un archivo .docx válido.');
+  const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const kids = (el, name) => el ? [...el.childNodes].filter(n => n.localName === name) : [];
+  const kid = (el, name) => kids(el, name)[0];
+  const val = (el, a = 'val') => el?.getAttributeNS(W, a) ?? el?.getAttribute('w:' + a) ?? null;
+  const onOff = el => el ? !['0', 'false', 'off'].includes(String(val(el)).toLowerCase()) : null;
+  const styles = {};
+  const sx = await zip.file('word/styles.xml')?.async('string');
+  if (sx) {
+    const sd = new DOMParser().parseFromString(sx, 'application/xml');
+    for (const st of sd.getElementsByTagNameNS(W, 'style')) {
+      const pPr = kid(st, 'pPr'), rPr = kid(st, 'rPr'), ind = kid(pPr, 'ind');
+      styles[val(st, 'styleId')] = {
+        name: val(kid(st, 'name')) || '', based: val(kid(st, 'basedOn')),
+        left: ind ? +(val(ind, 'left') ?? val(ind, 'start') ?? 0) : null, jc: val(kid(pPr, 'jc')),
+        sz: kid(rPr, 'sz') ? +val(kid(rPr, 'sz')) : null, bold: onOff(kid(rPr, 'b'))
+      };
+    }
+  }
+  const sv = (id, k) => { for (let i = 0; id && styles[id] && i < 10; i++) { if (styles[id][k] != null) return styles[id][k]; id = styles[id].based; } return null; };
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  const out = [];
+  for (const p of doc.getElementsByTagNameNS(W, 'p')) {
+    const pPr = kid(p, 'pPr'); const sid = val(kid(pPr, 'pStyle'));
+    const ind = kid(pPr, 'ind');
+    let left = ind ? +(val(ind, 'left') ?? val(ind, 'start') ?? 0) : (sv(sid, 'left') ?? 0);
+    const jc = val(kid(pPr, 'jc')) || sv(sid, 'jc');
+    let text = '', boldChars = 0, chars = 0, szSum = 0;
+    for (const r of p.getElementsByTagNameNS(W, 'r')) {
+      const rPr = kid(r, 'rPr'); const rs = val(kid(rPr, 'rStyle'));
+      const b = onOff(kid(rPr, 'b')) ?? sv(rs, 'bold') ?? sv(sid, 'bold') ?? false;
+      const sz = (kid(rPr, 'sz') ? +val(kid(rPr, 'sz')) : null) ?? sv(rs, 'sz') ?? sv(sid, 'sz') ?? 22;
+      for (const n of r.childNodes) {
+        let t = '';
+        if (n.localName === 't') t = n.textContent; else if (n.localName === 'tab') t = '\t'; else if (n.localName === 'br' || n.localName === 'cr') t = ' ';
+        text += t; const c = t.replace(/\s/g, '').length; chars += c; if (b) boldChars += c; szSum += sz * c;
+      }
+    }
+    const lead = text.match(/^[\t ]*/)[0];
+    const tabs = (lead.match(/\t/g) || []).length, spaces = (lead.match(/ /g) || []).length;
+    const clean = cleanTxt(text); if (!clean) continue;
+    const name = (styles[sid]?.name || sid || '').toLowerCase();
+    const hm = name.match(/^(?:heading|título|titulo|encabezado)\s*(\d)/);
+    const level = name === 'title' || name === 'título' || name === 'titulo' ? 0 : hm ? +hm[1] : null;
+    let indIn = left / 1440 + tabs * .5 + spaces * .1;
+    const caps = isCaps(clean) && clean.length < 40;
+    if (jc === 'center') indIn = caps ? 2.2 : Math.max(indIn, 1);
+    if (jc === 'right' || jc === 'end') indIn = 4.5;
+    out.push({ text: clean, ind: indIn, size: chars ? szSum / chars / 2 : 11, bold: chars > 0 && boldChars >= chars * .8, level, blank: true });
+  }
+  return out;
+}
+/* ¿Tiene formato de guion de cine (personajes y diálogos con sangría)? */
+function looksLikeScreenplay(paras) {
+  const chars = paras.filter(p => p.ind >= 1.7 && p.ind < 3.3 && isCaps(p.text) && p.text.length < 40 && !/^\(/.test(p.text)).length;
+  const dia = paras.filter(p => p.ind >= .6 && p.ind < 1.7).length;
+  return chars >= 3 && dia >= 3;
+}
+function screenplayFromParas(paras) {
+  const out = [];
+  // portada: si la primera página no tiene escenas y el guion empieza después, se salta
+  const firstScene = paras.find(p => p.ind < .6 && SCENE_RE.test(p.text.replace(/^\d+[A-Z]?\.?\s+/, '')));
+  if (firstScene?.page > 1 && paras[0].page === 1) paras = paras.filter(p => p.page !== 1);
+  for (const p of paras) {
+    let s = p.text, t;
+    const sh = s.replace(/^\d+[A-Z]?\.?\s+/, '').replace(/\s+\d+[A-Z]?\.?$/, '');
+    if (p.ind < .6 && SCENE_RE.test(sh)) { t = 'scene'; s = sh; }
+    else if (p.ind >= 3.3 || (p.ind >= 2.5 && /:$/.test(s) && isCaps(s))) t = 'transition';
+    else if (p.ind >= 1.75) t = /^\(/.test(s) ? 'paren' : isCaps(s) ? 'character' : 'dialogue';
+    else if (p.ind >= .6) t = /^\(/.test(s) ? 'paren' : 'dialogue';
+    else t = isCaps(s) && /(TO:|A:)$/.test(s) && s.length < 40 ? 'transition' : 'action';
+    const prev = out[out.length - 1];
+    if (prev && prev.t === 'paren' && !/\)\s*$/.test(prev.x) && t !== 'scene' && t !== 'character') { prev.x += ' ' + s; continue; }
+    if (prev && !p.blank && prev.t === t && (t === 'action' || t === 'dialogue')) { prev.x += ' ' + s; continue; }
+    out.push({ t, x: s });
+  }
+  return out;
+}
+/* Guiones de reel / anuncio: títulos, [acotaciones] y texto hablado */
+function docFromParas(paras, title) {
+  const body = modeOf(paras.flatMap(p => Array(Math.min(50, Math.ceil(p.text.length / 10))).fill(Math.round(p.size * 2) / 2))) || 11;
+  const big = p => p.size > body * 1.15;
+  const SECTION_RE = /^(HOOKS?|MEAT|CTA|CUERPO|DESARROLLO|CIERRE|INTRO|OUTRO|GANCHO|REMATE|ESCENA|PARTE|BLOQUE|ACTO|SECUENCIA|CONTEXTO|GUI[OÓ]N|SCRIPT|LOCUCI[OÓ]N)\b/i;
+  const isLabel = p => /:$/.test(p.text) && p.text.length < 45 && !big(p) && p.level == null;
+  const sentence = p => /[.?!…,;:”"»]$/.test(p.text) || !/^[\p{Lu}\d¿¡]/u.test(p.text);
+  const isHead = p => !isLabel(p) && !/^\[.*\]$/.test(p.text) && !/https?:\/\//.test(p.text) && p.text.length <= 120 &&
+    (p.level != null || (SECTION_RE.test(p.text) && p.text.length <= 90 && !/[?!]$/.test(p.text)) ||
+     (!sentence(p) && ((big(p) && p.text.length <= 90) || (p.bold && p.text.length <= 90))));
+  // unir líneas cortadas del PDF (también títulos largos que ocupan dos líneas)
+  const P2 = [];
+  for (const p of paras) {
+    const prev = P2[P2.length - 1];
+    const same = prev && prev.bold === p.bold && Math.abs(prev.size - p.size) < 1;
+    if (same && (p.wrap || (big(prev) && prev.long && p.gap < p.size * 2.1 && !SECTION_RE.test(p.text)))) { prev.text += ' ' + p.text; prev.xEnd = p.xEnd; prev.long = p.long; continue; }
+    P2.push({ ...p });
+  }
+  paras = P2.filter(p => p.text);
+  // ¿varios guiones en un archivo? (los títulos más grandes y los que empiezan igual: «Batch…», «Guion…»)
+  const heads = paras.filter(isHead);
+  let splitIdx = [];
+  if (heads.length) {
+    const levels = heads.filter(h => h.level != null).map(h => h.level);
+    const minL = levels.length ? Math.min(...levels) : null;
+    const maxS = Math.max(...heads.map(h => h.size));
+    const top = h => minL != null ? h.level === minL : h.size >= maxS - .5 && big(h);
+    let tops = heads.filter(top);
+    const word = h => (h.text.match(/^[^\s:\d]+/) || [''])[0].toLowerCase();
+    const w = modeOf(tops.map(word));
+    if (w && w.length > 2 && tops.filter(h => word(h) === w).length >= Math.max(2, tops.length * .6))
+      tops = heads.filter(h => word(h) === w && (big(h) || h.bold || h.level != null));
+    if (tops.length >= 2) splitIdx = tops.map(h => paras.indexOf(h));
+  }
+  // en cada sección: el texto normal es voz en off si la sección es HOOK/MEAT/CTA… o tiene 2+ acotaciones entre [corchetes]
+  const vo = new Array(paras.length).fill(false);
+  let start = 0;
+  const mark = (a, b) => {
+    const n = paras.slice(a, b).filter(p => /^\[.*\]$/.test(p.text)).length;
+    const spoken = n >= 2 || (isHead(paras[a]) && SECTION_RE.test(paras[a].text) && !/^CONTEXTO/i.test(paras[a].text));
+    for (let k = a; k < b; k++) vo[k] = spoken;
+  };
+  paras.forEach((p, k) => { if (k > start && isHead(p)) { mark(start, k); start = k; } }); mark(start, paras.length);
+  const classify = (from, to) => {
+    const out = [];
+    const last = () => out[out.length - 1]?.t;
+    const dia = x => { if (!['character', 'paren', 'dialogue'].includes(last())) out.push({ t: 'character', x: 'VOZ EN OFF' }); out.push({ t: 'dialogue', x }); };
+    for (let k = from; k < to; k++) {
+      const p = paras[k], s = p.text; let m;
+      if (SCENE_RE.test(s)) { out.push({ t: 'scene', x: s }); continue; }
+      if (isHead(p)) { out.push({ t: 'scene', x: s }); continue; }
+      if (isLabel(p)) { out.push({ t: 'action', x: s }); continue; }
+      if (/^\[.*\]$/.test(s)) { out.push({ t: 'action', x: s.slice(1, -1).trim() }); continue; }
+      if ((m = s.match(/^(VISUAL|VIDEO|V[IÍ]DEO|IMAGEN|PLANO|B-?ROLL|TEXTO EN PANTALLA|TEXTO|SUPER|GR[AÁ]FICO)\s*:\s*(.+)$/i))) { out.push({ t: 'action', x: s }); continue; }
+      if ((m = s.match(/^(AUDIO|VO|V\.O\.|VOZ EN OFF|VOZ|LOCUCI[OÓ]N|NARRADOR|NARRACI[OÓ]N)\s*:\s*(.+)$/i))) { out.push({ t: 'character', x: 'VOZ EN OFF' }); out.push({ t: 'dialogue', x: m[2] }); continue; }
+      if ((m = s.match(/^([A-ZÁÉÍÓÚÑÜ][A-ZÁÉÍÓÚÑÜ0-9 .'-]{0,28}?)\s*(\([^)]*\))?\s*:\s*(.+)$/)) && !SCENE_RE.test(s)) {
+        out.push({ t: 'character', x: m[1].trim() }); if (m[2]) out.push({ t: 'paren', x: m[2] }); out.push({ t: 'dialogue', x: m[3] }); continue;
+      }
+      if (last() === 'character') { out.push({ t: /^\(.*\)$/.test(s) ? 'paren' : 'dialogue', x: s }); continue; }
+      if (last() === 'paren') { out.push({ t: 'dialogue', x: s }); continue; }
+      const next = paras[k + 1];
+      if (isCaps(s) && /(TO:|A:)$/.test(s) && s.length < 40) { out.push({ t: 'transition', x: s }); continue; }
+      if (isCaps(s) && s.length < 40 && !/[.!?…:]$/.test(s.replace(/\(.*\)$/, '').trim()) && next && k + 1 < to && !isHead(next) && !SCENE_RE.test(next.text)) { out.push({ t: 'character', x: s }); continue; }
+      if (/^[“"«¨]/.test(s) && !/[”"»]\s*$/.test(s)) { // cita que sigue en las líneas siguientes
+        let x = s, j = k;
+        while (j + 1 < to && j - k < 6 && !isHead(paras[j + 1]) && !/[”"»]/.test(x.slice(1))) { j++; x += ' ' + paras[j].text; }
+        if (/[”"»]/.test(x.slice(1))) { dia(x); k = j; continue; }
+      }
+      if (/^[“"«].*[”"»]$/.test(s) || vo[k]) { dia(s); continue; }
+      out.push({ t: 'action', x: s });
+    }
+    return out;
+  };
+  if (splitIdx.length >= 2) {
+    const sets = [];
+    splitIdx.forEach((at, i) => {
+      const from = i === 0 ? 0 : at; const end = splitIdx[i + 1] ?? paras.length;
+      const blocks = classify(i === 0 ? 0 : at + 1, end).filter(b => !(i === 0 && b.x === paras[at].text && b.t === 'scene'));
+      sets.push({ title: paras[at].text.replace(/[:.\s]+$/, ''), blocks });
+    });
+    return { sets, all: { title, blocks: classify(0, paras.length) } };
+  }
+  return { sets: [{ title, blocks: classify(0, paras.length) }] };
+}
+/* Texto plano con sangrías (guion exportado a .txt desde Final Draft, etc.) */
+function txtParas(text) {
+  const out = []; let blank = true;
+  for (const raw of text.replace(/\r/g, '').split('\n')) {
+    if (!raw.trim()) { blank = true; continue; }
+    const lead = raw.match(/^[\t ]*/)[0];
+    out.push({ text: cleanTxt(raw), ind: (lead.match(/\t/g) || []).length * .5 + (lead.match(/ /g) || []).length * .1, blank, size: 12, bold: false });
+    blank = false;
+  }
+  // la sangría de la acción puede no ser 0
+  const base = Math.min(...out.map(p => p.ind)); out.forEach(p => p.ind -= base);
+  return out;
+}
+
+const upT = b =>['scene', 'character', 'transition'].includes(b.t) ? b.x.toUpperCase() : b.x;
 function toFountain() {
   let s = `Title: ${P.title}\nAuthor: ${P.author}\n${P.contact ? 'Contact: ' + P.contact + '\n' : ''}\n`;
   let prev = '';
@@ -268,8 +539,10 @@ function renderHome() {
           <button class="btn sm" data-dup="${p.id}">Duplicar</button>
           <button class="btn sm danger" data-del="${p.id}">Borrar</button>
         </div>
-      </div>`).join('') || '<p class="muted">Todavía no hay guiones. Crea uno nuevo o importa un .fountain, .fdx, .txt o un respaldo .json.</p>'}
+      </div>`).join('') || '<p class="muted">Todavía no hay guiones. Crea uno nuevo o importa uno.</p>'}
     </div>
+    <div class="note" id="dropHome"><b>Importar:</b> PDF, Word (.docx), Final Draft (.fdx), Fountain, .txt o un respaldo .json. Puedes arrastrar el archivo aquí.<br>
+      ¿Está en <b>Google Docs</b>? Ábrelo y ve a <b>Archivo › Descargar › Microsoft Word (.docx)</b> o <b>PDF</b>, y luego impórtalo.</div>
     <div class="note"><b>Dónde se guarda:</b> los guiones viven solo en este navegador y en este equipo, no en internet. Para pasarlos a otra persona o guardar una copia, usa <b>Exportar › Respaldo completo (.json)</b> y súbelo a Drive; la otra persona lo abre con <b>Importar archivo</b>.</div>
   </div>`;
 }
@@ -280,7 +553,7 @@ app.addEventListener('click', async e => {
   if (t.dataset.home === 'new') {
     const p = newProject(); writeProject(p); askPersist(); location.hash = `#/p/${p.id}/guion`;
   } else if (t.dataset.home === 'import') {
-    const [f] = await pickFiles('.json,.fountain,.fdx,.txt,.spmd'); if (f) importFile(f);
+    const [f] = await pickFiles('.pdf,.docx,.doc,.fountain,.fdx,.txt,.json'); if (f) importFile(f);
   } else if (t.dataset.home === 'sample') {
     const p = sampleProject(); writeProject(p); location.hash = `#/p/${p.id}/guion`;
   } else if (t.dataset.dup) {
@@ -293,6 +566,8 @@ app.addEventListener('click', async e => {
     localStorage.removeItem(PKEY(t.dataset.del)); saveIndex(loadIndex().filter(x => x.id !== t.dataset.del)); renderHome();
   } else if (t.dataset.open) location.hash = `#/p/${t.dataset.open}/guion`;
 });
+app.addEventListener('dragover', e => { if (!P && [...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
+app.addEventListener('drop', e => { if (P) return; e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) importFile(f); });
 function askPersist() { try { navigator.storage?.persist?.(); } catch {} }
 
 /* Imágenes de un proyecto (para respaldo, copia y borrado) */
@@ -313,8 +588,36 @@ async function cloneProject(src, title) {
   return p;
 }
 async function importFile(f) {
-  const text = await f.text(); const name = f.name.replace(/\.[^.]+$/, '');
+  const name = f.name.replace(/\.[^.]+$/, '');
   try {
+    if (/\.doc$/i.test(f.name)) throw new Error('Los .doc antiguos de Word no se pueden leer. Ábrelo en Word o Google Docs y guárdalo como .docx o PDF.');
+    if (/\.(pdf|docx)$/i.test(f.name)) {
+      const isPdf = /\.pdf$/i.test(f.name);
+      const buf = await f.arrayBuffer();
+      toast(isPdf ? 'Leyendo PDF…' : 'Leyendo documento de Word…');
+      let paras;
+      if (isPdf) {
+        const lines = await pdfLines(buf, (n, t) => { if (t > 3) toast(`Leyendo PDF: página ${n} de ${t}…`); });
+        if (!lines.length) throw new Error('Este PDF no tiene texto (parece escaneado o una imagen). Hace falta un PDF exportado desde Word, Google Docs o Final Draft.');
+        paras = pdfParas(lines);
+      } else paras = await docxParas(buf);
+      if (!paras.length) throw new Error('No se encontró texto en el archivo.');
+      let sets;
+      if (looksLikeScreenplay(paras)) sets = [{ title: name, blocks: screenplayFromParas(paras) }];
+      else {
+        const r = docFromParas(paras, name);
+        sets = r.sets;
+        if (r.all && !confirm(`Este archivo trae ${r.sets.length} guiones:\n\n${r.sets.slice(0, 12).map(s => '• ' + s.title).join('\n')}${r.sets.length > 12 ? '\n…' : ''}\n\nAceptar = un guion por cada uno\nCancelar = todo en un solo guion`)) sets = [r.all];
+      }
+      sets = sets.filter(s => s.blocks.length);
+      if (!sets.length) throw new Error('No se encontró texto en el archivo.');
+      const made = sets.map(s => { const p = newProject(s.title || name); p.blocks = s.blocks.map(b => ({ id: uid(), ...b })); writeProject(p); return p; });
+      askPersist();
+      if (made.length === 1) location.hash = `#/p/${made[0].id}/guion`; else renderHome();
+      toast(made.length === 1 ? `Importado: ${made[0].blocks.filter(b => b.t === 'scene').length} escenas` : `Importados ${made.length} guiones`);
+      return;
+    }
+    const text = await f.text();
     if (/\.json$/i.test(f.name)) {
       const data = JSON.parse(text); if (!data.project) throw new Error('No es un respaldo de Glanx Guiones');
       let p = normalizeProject(data.project);
@@ -323,7 +626,10 @@ async function importFile(f) {
       writeProject(p); location.hash = `#/p/${p.id}/guion`; toast('Respaldo importado');
       return;
     }
-    const blocks = /\.fdx$/i.test(f.name) ? parseFDX(text) : parseScript(text);
+    let blocks;
+    if (/\.fdx$/i.test(f.name)) blocks = parseFDX(text);
+    else if (/\.txt$/i.test(f.name) && looksLikeScreenplay(txtParas(text))) blocks = screenplayFromParas(txtParas(text)).map(b => ({ id: uid(), ...b }));
+    else blocks = parseScript(text);
     if (!blocks.length) throw new Error('El archivo está vacío');
     const p = newProject(name); p.blocks = blocks; writeProject(p); askPersist();
     location.hash = `#/p/${p.id}/guion`; toast(`Importado: ${blocks.filter(b => b.t === 'scene').length} escenas`);
