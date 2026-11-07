@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glanx Guiones</title>
+<meta name="description" content="Glanx Studio: del guion al rodaje. Editor de guion, desglose, planos, plan de rodaje, presupuesto y moodboard.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23f2b544'/%3E%3Ctext x='16' y='23' font-family='Arial' font-weight='900' font-size='19' text-anchor='middle' fill='%23111'%3EG%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Courier+Prime:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/" title="Todos los guiones"><span class="logo">G</span><span class="brand-txt">GLANX <em>Guiones</em></span></a>
+  <input id="projTitle" class="proj-title only-project" aria-label="Título del guion" spellcheck="false">
+  <nav id="tabs" class="tabs only-project">
+    <a data-view="guion">Guion</a>
+    <a data-view="desglose">Desglose</a>
+    <a data-view="planos">Planos</a>
+    <a data-view="rodaje">Plan de rodaje</a>
+    <a data-view="presupuesto">Presupuesto</a>
+    <a data-view="moodboard">Moodboard</a>
+  </nav>
+  <div class="top-actions only-project">
+    <span id="saveState" class="save-state"></span>
+    <div class="menu">
+      <button id="menuBtn" class="btn">Exportar ▾</button>
+      <div id="menu" class="menu-pop" hidden>
+        <button data-act="pdf">PDF del guion</button>
+        <button data-act="printview">Imprimir / PDF de esta pestaña</button>
+        <hr>
+        <button data-act="json">Respaldo completo (.json)</button>
+        <button data-act="fountain">Fountain (.fountain)</button>
+        <button data-act="fdx">Final Draft (.fdx)</button>
+        <hr>
+        <button data-act="info">Datos del guion…</button>
+      </div>
+    </div>
+  </div>
+</header>
+<main id="app"></main>
+<div id="print"></div>
+<div id="tagpop" class="tagpop" hidden></div>
+<div id="lightbox" class="lightbox" hidden></div>
+<div id="dialog" class="dialog-back" hidden></div>
+<div id="toast" class="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
