@@ -487,3 +487,21 @@ body.ro #ed{caret-color:transparent}
 .cm.focus{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
 @media (max-width:900px){.cmark{right:2px;padding:2px 6px;font-size:11px}}
 @media print{#cmarks{display:none}}
+
+/* menciones */
+.bell-btn{flex:none;display:flex;align-items:center;gap:4px}
+.bell-btn b{background:var(--bad);color:#fff;border-radius:99px;padding:0 6px;font-size:11px}
+.ment{background:rgba(110,160,255,.18);color:#9cc0ff;border-radius:4px;padding:0 3px;font-weight:600}
+.ment.me{background:rgba(242,181,68,.25);color:var(--acc2)}
+.mentpop{z-index:75}
+.mentpop button{display:flex;flex-direction:column;font:600 13px var(--ui)}
+.mentpop button span{font-weight:400;font-size:11.5px;color:var(--muted)}
+.mentpop button.on span{color:var(--accink)}
+.dialog.wide{width:min(560px,100%)}
+.ment-list{display:flex;flex-direction:column;gap:6px;max-height:60vh;overflow:auto}
+.ment-it{text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:9px 11px;cursor:pointer;display:flex;flex-direction:column;gap:3px;color:var(--tx)}
+.ment-it:hover{border-color:var(--acc)}
+.ment-it.new{border-left:3px solid var(--acc)}
+.ment-it span{font-size:12px} .ment-it .ment-body{font-size:13.5px}
+.ment-it q{font:italic 12px var(--mono);color:var(--muted);quotes:'«' '»'}
+@media print{.bell-btn{display:none!important}}

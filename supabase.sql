@@ -116,3 +116,26 @@ create policy img_sel on storage.objects for select
   using (bucket_id = 'img' and public.project_role((storage.foldername(name))[1]) is not null);
 create policy img_ins on storage.objects for insert
   with check (bucket_id = 'img' and public.project_role((storage.foldername(name))[1]) in ('owner', 'editor'));
+
+-- ===== v2: menciones (@persona) y nombres =====
+alter table public.comments add column if not exists mentions text[] not null default '{}';
+create index if not exists comments_mentions on public.comments using gin (mentions);
+
+create table if not exists public.profiles (
+  id uuid primary key references auth.users on delete cascade,
+  email text,
+  name text,
+  mentions_seen_at timestamptz not null default now()
+);
+alter table public.profiles enable row level security;
+drop policy if exists pr_self on public.profiles;
+drop policy if exists pr_sel on public.profiles;
+create policy pr_self on public.profiles for all using (id = auth.uid()) with check (id = auth.uid());
+-- ves el nombre de quien comparte algún proyecto contigo
+create policy pr_sel on public.profiles for select using (
+  id = auth.uid() or exists (
+    select 1 from public.projects p
+    where public.project_role(p.id) is not null
+      and (p.owner = profiles.id or exists (select 1 from public.project_members m where m.project_id = p.id and m.email = lower(profiles.email)))
+  )
+);

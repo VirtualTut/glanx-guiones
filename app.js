@@ -2286,9 +2286,11 @@ function cloudInit() {
     CL.sb = supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: true, storageKey: 'glanx.auth' } });
     const { data } = await CL.sb.auth.getSession();
     CL.user = data.session?.user || null; CL.token = data.session?.access_token || null;
+    if (CL.user) setTimeout(() => { upsertProfile(); loadMentions(); mentionsLive(); }, 0);
     CL.sb.auth.onAuthStateChange((ev, s) => {
       const before = CL.user?.id; CL.user = s?.user || null; CL.token = s?.access_token || null;
       userBtn();
+      if (before !== CL.user?.id) setTimeout(() => { upsertProfile(); loadMentions(); mentionsLive(); bell(); }, 0);
       if (before !== CL.user?.id) { if (!P) renderHome(); else if (P.cloud) { cloudLeave(); P = null; location.hash = '#/'; route(); } }
     });
     userBtn();
@@ -2433,8 +2435,9 @@ async function cloudOpen(id) {
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'projects', filter: `id=eq.${id}` }, ev => onRemoteRow(ev.new))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'comments', filter: `project_id=eq.${id}` }, () => loadComments())
     .subscribe();
-  loadComments();
+  await loadPeople(); await loadComments();
   if (CL.role !== 'viewer') await tryLock(true); else rerender();
+  if (CL.goC?.project_id === id) setTimeout(() => focusComment(CL.goC), 300);
   clearInterval(CL.tick); CL.tick = setInterval(cloudTick, 15e3);
 }
 function applyRow(row) {
@@ -2566,7 +2569,7 @@ async function shareDialog() {
       if (email === CL.user.email) return toast('Ese eres tú');
       const { error } = await CL.sb.from('project_members').upsert({ project_id: P.id, email, role: $('#mRole').value });
       if (error) return toast('No se pudo invitar: ' + error.message);
-      toast('Invitado: ' + email); draw(await load());
+      toast('Invitado: ' + email); draw(await load()); loadPeople();
     }
     const rm = e.target.closest('[data-rmm]');
     if (rm && confirm(`¿Quitar a ${rm.dataset.rmm}?`)) { await CL.sb.from('project_members').delete().eq('project_id', P.id).eq('email', rm.dataset.rmm); draw(await load()); }
@@ -2619,20 +2622,20 @@ function cmtOpen(draft) {
   $('#cmt').hidden = false; document.body.classList.add('cmt-open'); cmtRender(); setTimeout(placeMarks, 0);
   setTimeout(() => $('#cmtTxt')?.focus(), 30);
 }
-function cmtClose() { CL.open = false; CL.focus = null; setTimeout(placeMarks, 0); const c = $('#cmt'); if (c) c.hidden = true; document.body.classList.remove('cmt-open'); }
+function cmtClose() { CL.open = false; CL.focus = null; CL.focusC = null; setTimeout(placeMarks, 0); const c = $('#cmt'); if (c) c.hidden = true; document.body.classList.remove('cmt-open'); }
 const ago = t => { const s = (Date.now() - new Date(t)) / 1000; return s < 60 ? 'ahora' : s < 3600 ? `hace ${Math.floor(s / 60)} min` : s < 86400 ? `hace ${Math.floor(s / 3600)} h` : fmtDate(t); };
 function cmtRender() {
   const box = $('#cmt'); if (!box || !CL.open || !CL.user) return;
   const all = CL.comments, roots = all.filter(c => !c.parent_id).reverse();
   const shown = roots.filter(c => CL.showRes || !c.resolved), nres = roots.filter(c => c.resolved).length;
   const canMod = c => c.author === CL.user.id || CL.role === 'owner';
-  const one = c => `<div class="cm-body">${esc(c.body).replace(/\n/g, '<br>')}</div><div class="cm-meta"><b>${esc(c.author_name || '—')}</b> · ${ago(c.created_at)}${canMod(c) ? ` · <a data-cdelc="${c.id}">borrar</a>` : ''}</div>`;
+  const one = c => `<div class="cm-body">${bodyHTML(c.body)}</div><div class="cm-meta"><b>${esc(c.author_name || '—')}</b> · ${ago(c.created_at)}${canMod(c) ? ` · <a data-cdelc="${c.id}">borrar</a>` : ''}</div>`;
   const d = CL.draft;
   box.innerHTML = `<div class="cm-h"><b>Comentarios</b><span class="spacer"></span>${nres ? `<label class="muted"><input type="checkbox" data-showres ${CL.showRes ? 'checked' : ''}> Resueltos (${nres})</label>` : ''}<button class="iconbtn" data-cclose title="Cerrar">×</button></div>
     <div class="cm-new">${d ? `<div class="cm-where">En: ${esc(cmtWhere(d))}${d.quote ? `<q>${esc(d.quote)}</q>` : ''}<button class="iconbtn" data-cnodraft title="Quitar">×</button></div>` : ''}
-      <textarea class="inp" id="cmtTxt" rows="3" placeholder="Escribe un comentario…  (Ctrl+Enter para enviar)"></textarea>
+      <textarea class="inp" id="cmtTxt" rows="3" placeholder="Escribe un comentario… Usa @ para mencionar a alguien (Ctrl+Enter envía)"></textarea>
       <div class="row" style="margin-top:6px"><span class="muted" style="font-size:11.5px">Selecciona texto del guion para comentar esa parte.</span><span class="spacer"></span><button class="btn pri sm" data-csend>Comentar</button></div></div>
-    <div class="cm-list">${shown.map(c => `<div class="cm ${c.resolved ? 'res' : ''} ${CL.focus && c.block === CL.focus ? 'focus' : ''}" data-cid="${c.id}">
+    <div class="cm-list">${shown.map(c => `<div class="cm ${c.resolved ? 'res' : ''} ${(CL.focus && c.block === CL.focus) || CL.focusC === c.id ? 'focus' : ''}" data-cid="${c.id}">
         <div class="cm-where link" data-cgo="${c.id}">${esc(cmtWhere(c))}${c.quote ? `<q>${esc(c.quote)}</q>` : ''}</div>${one(c)}
         ${all.filter(r => r.parent_id === c.id).map(r => `<div class="cm-reply">${one(r)}</div>`).join('')}
         ${CL.reply === c.id ? `<div class="cm-reply"><textarea class="inp" id="cmtRep" rows="2" placeholder="Responder…"></textarea><div class="row" style="margin-top:4px;justify-content:flex-end"><button class="btn sm" data-crcancel>Cancelar</button><button class="btn sm pri" data-crsend="${c.id}">Responder</button></div></div>` : ''}
@@ -2643,9 +2646,11 @@ function cmtRender() {
 async function cmtSend(body, parent) {
   body = body.trim(); if (!body) return;
   const base = parent ? { parent_id: parent.id, view: parent.view, sid: parent.sid, block: parent.block } : { ...(CL.draft || { view: UI.view }) };
-  const { error } = await CL.sb.from('comments').insert({ ...base, project_id: P.id, body, author: CL.user.id, author_name: myName() });
+  const mentions = mentionsIn(body);
+  const { error } = await CL.sb.from('comments').insert({ ...base, project_id: P.id, body, mentions, author: CL.user.id, author_name: myName() });
   if (error) return toast('No se pudo comentar: ' + error.message);
   if (!parent) CL.draft = null; CL.reply = null; await loadComments();
+  if (mentions.length) toast('Avisado: ' + CL.people.filter(p => mentions.includes(p.email)).map(p => p.name).join(', '));
 }
 function cmtGo(c) {
   const show = () => {
@@ -2706,6 +2711,108 @@ app.addEventListener('click', async e => {
   }
   const co = t.closest('[data-copen]'); if (co) { e.stopPropagation(); location.hash = `#/p/${co.dataset.copen}/guion`; }
 }, true);
+/* ---- menciones (@persona) y avisos ---- */
+async function upsertProfile() {
+  if (!CL.user) return;
+  await CL.sb.from('profiles').upsert({ id: CL.user.id, email: CL.user.email.toLowerCase(), name: myName() });
+}
+async function loadPeople() {
+  if (!CL.pid) return;
+  const mem = (await CL.sb.from('project_members').select('email').eq('project_id', CL.pid)).data || [];
+  const emails = [...new Set([CL.row?.owner_email, ...mem.map(m => m.email)].filter(Boolean).map(e => e.toLowerCase()))];
+  const prof = emails.length ? (await CL.sb.from('profiles').select('email,name').in('email', emails)).data || [] : [];
+  CL.people = emails.map(e => ({ email: e, name: (prof.find(p => (p.email || '').toLowerCase() === e)?.name || e.split('@')[0]).trim() }));
+}
+const mentionsIn = body => (CL.people || []).filter(p => p.email !== CL.user.email.toLowerCase() && body.includes('@' + p.name)).map(p => p.email);
+function bodyHTML(body) {
+  let h = esc(body);
+  [...(CL.people || [])].sort((a, b) => b.name.length - a.name.length).forEach(p => {
+    const me = p.email === CL.user?.email?.toLowerCase();
+    h = h.split('@' + esc(p.name)).join(`<span class="ment ${me ? 'me' : ''}" title="${esc(p.email)}">@${esc(p.name)}</span>`);
+  });
+  return h.replace(/\n/g, '<br>');
+}
+// lista al escribir @ en un comentario
+const MP = { ta: null, items: [], i: 0, at: 0 };
+function mentUpdate(ta) {
+  const pop = $('#mentpop'); const pre = ta.value.slice(0, ta.selectionStart); const m = /(^|\s)@([^\s@]{0,30})$/.exec(pre);
+  if (!m || !CL.people?.length) { pop.hidden = true; MP.items = []; return; }
+  const q = fold(m[2]);
+  MP.items = CL.people.filter(p => p.email !== CL.user.email.toLowerCase() && (fold(p.name).includes(q) || fold(p.email).includes(q))).slice(0, 6);
+  if (!MP.items.length) { pop.hidden = true; return; }
+  MP.ta = ta; MP.at = pre.length - m[2].length - 1; MP.i = Math.min(MP.i, MP.items.length - 1);
+  pop.innerHTML = `<div class="ac-h">Mencionar a…</div>` + MP.items.map((p, i) => `<button data-mp="${i}" class="${i === MP.i ? 'on' : ''}"><b>${esc(p.name)}</b><span>${esc(p.email)}</span></button>`).join('');
+  const r = ta.getBoundingClientRect(); pop.hidden = false;
+  pop.style.left = r.left + 'px'; pop.style.top = (r.bottom + 4) + 'px'; pop.style.width = r.width + 'px';
+}
+function mentPick(i) {
+  const p = MP.items[i], ta = MP.ta; if (!p || !ta) return;
+  const v = ta.value, end = ta.selectionStart, ins = '@' + p.name + ' ';
+  ta.value = v.slice(0, MP.at) + ins + v.slice(end);
+  const c = MP.at + ins.length; ta.setSelectionRange(c, c); ta.focus();
+  $('#mentpop').hidden = true; MP.items = [];
+}
+document.addEventListener('mousedown', e => { const b = e.target.closest('[data-mp]'); if (b) { e.preventDefault(); mentPick(+b.dataset.mp); } else if (!e.target.closest('#cmt')) $('#mentpop').hidden = true; });
+$('#cmt').addEventListener('input', e => { if (e.target.matches('textarea')) mentUpdate(e.target); });
+$('#cmt').addEventListener('keydown', e => {
+  if (!MP.items.length || $('#mentpop').hidden) return;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); MP.i = (MP.i + (e.key === 'ArrowDown' ? 1 : MP.items.length - 1)) % MP.items.length; mentUpdate(e.target); e.stopImmediatePropagation(); }
+  else if ((e.key === 'Enter' && !e.ctrlKey && !e.metaKey) || e.key === 'Tab') { e.preventDefault(); mentPick(MP.i); e.stopImmediatePropagation(); }
+  else if (e.key === 'Escape') { $('#mentpop').hidden = true; MP.items = []; e.stopImmediatePropagation(); }
+}, true);
+
+// campana: menciones a mí en cualquier proyecto
+async function loadMentions() {
+  if (!CL.user) return;
+  const me = CL.user.email.toLowerCase();
+  const [{ data }, { data: prof }] = await Promise.all([
+    CL.sb.from('comments').select('id,project_id,view,sid,block,quote,body,author,author_name,created_at,resolved,projects(title)').contains('mentions', [me]).order('created_at', { ascending: false }).limit(40),
+    CL.sb.from('profiles').select('mentions_seen_at').eq('id', CL.user.id).maybeSingle()]);
+  CL.mentions = (data || []).filter(c => c.author !== CL.user.id);
+  CL.seenAt = prof?.mentions_seen_at ? new Date(prof.mentions_seen_at).getTime() : 0;
+  bell();
+}
+function bell() {
+  const b = $('#bellBtn'); if (!b) return;
+  b.hidden = !CL.user;
+  const n = (CL.mentions || []).filter(c => new Date(c.created_at).getTime() > CL.seenAt).length;
+  b.innerHTML = `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M8 1.5a4 4 0 0 0-4 4v2.6L2.6 10.5v1h10.8v-1L12 8.1V5.5a4 4 0 0 0-4-4zM6.3 12.5a1.8 1.8 0 0 0 3.4 0z" fill="currentColor"/></svg>${n ? `<b>${n}</b>` : ''}`;
+  b.title = n ? `${n} menciones nuevas` : 'Menciones';
+}
+function bellDialog() {
+  const d = $('#dialog'), list = CL.mentions || [];
+  d.innerHTML = `<div class="dialog wide"><h3>Te mencionaron</h3><div class="ment-list">${list.map(c => `<button class="ment-it ${new Date(c.created_at).getTime() > CL.seenAt ? 'new' : ''}" data-mgo="${c.id}">
+      <span class="muted">${esc(c.author_name || '—')} · ${ago(c.created_at)} · <b>${esc(c.projects?.title || 'Guion')}</b> · ${esc(VIEW_LABEL[c.view] || 'General')}${c.resolved ? ' · resuelto' : ''}</span>
+      ${c.quote ? `<q>${esc(c.quote)}</q>` : ''}<span class="ment-body">${esc(c.body)}</span></button>`).join('') || '<p class="muted">Nadie te ha mencionado todavía.</p>'}</div>
+    <div class="row"><button class="btn pri" data-x>Cerrar</button></div></div>`;
+  d.hidden = false;
+  CL.sb.from('profiles').update({ mentions_seen_at: new Date().toISOString() }).eq('id', CL.user.id).then(() => { CL.seenAt = Date.now(); bell(); });
+  d.onclick = e => {
+    if (e.target === d || e.target.closest('[data-x]')) { d.hidden = true; return; }
+    const it = e.target.closest('[data-mgo]'); if (!it) return;
+    const c = list.find(x => x.id === it.dataset.mgo); d.hidden = true;
+    CL.goC = c;
+    if (P?.id === c.project_id && CL.pid === c.project_id) focusComment(c);
+    else location.hash = `#/p/${c.project_id}/${c.view || 'guion'}`;
+  };
+}
+function focusComment(c) {
+  CL.goC = null; CL.focus = c.block || null; CL.focusC = c.id; CL.showRes ||= !!c.resolved;
+  cmtOpen(); cmtGo(c);
+  setTimeout(() => $(`.cm[data-cid="${c.id}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 400);
+}
+let mentChan = null;
+function mentionsLive() {
+  if (mentChan) { CL.sb.removeChannel(mentChan); mentChan = null; }
+  if (!CL.user) return;
+  const me = CL.user.email.toLowerCase();
+  mentChan = CL.sb.channel('ment-' + CL.user.id).on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'comments' }, ev => {
+    const c = ev.new; if (!c.mentions?.includes(me) || c.author === CL.user.id) return;
+    toast(`🔔 ${c.author_name || 'Alguien'} te mencionó: «${c.body.slice(0, 60)}»`); loadMentions();
+  }).subscribe();
+}
+$('#bellBtn').addEventListener('click', () => bellDialog());
+
 cloudInit();
 
 /* ================= Ejemplo ================= */
