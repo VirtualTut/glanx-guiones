@@ -1384,7 +1384,7 @@ function renderPlanos() {
         <td style="width:160px"><select class="inp" data-f="move"><option value=""></option>${MOVES.map(o => `<option ${sh.move === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td>
         <td style="min-width:220px"><input class="inp" data-f="desc" value="${esc(sh.desc)}" placeholder="Qué se ve, quién, acción…"></td>
         <td style="width:80px"><input class="inp" type="number" min="0" data-f="dur" value="${esc(sh.dur)}"></td>
-        <td><div class="thumb" data-pick title="Imagen de referencia">${sh.img ? `<img data-img="${sh.img}" alt="">` : '+'}</div></td>
+        <td><div class="thumbw">${sh.img ? `<div class="thumb" data-view="${sh.img}" title="Ver en grande"><img data-img="${sh.img}" alt=""></div><span class="thumb-acts"><button class="iconbtn" data-pick title="Cambiar imagen">✎</button><button class="iconbtn" data-rmimg title="Quitar imagen">×</button></span>` : '<div class="thumb" data-pick title="Añadir imagen de referencia">+</div>'}</div></td>
         <td><button class="iconbtn" data-mv="-1" title="Subir">↑</button><button class="iconbtn" data-mv="1" title="Bajar">↓</button><button class="iconbtn" data-dup title="Duplicar">⧉</button><button class="iconbtn" data-x title="Borrar">×</button></td></tr>`).join('')}
       </tbody></table></div>
       <datalist id="lenses">${['14mm', '16mm', '24mm', '35mm', '50mm', '85mm', '100mm macro', '135mm', '24-70mm', '70-200mm'].map(l => `<option value="${l}">`).join('')}</datalist>
@@ -1411,6 +1411,7 @@ function renderPlanos() {
     if (e.target.closest('[data-x]')) { if (sh[i].img) imgDel(sh[i].img).catch(() => {}); sh.splice(i, 1); }
     else if (e.target.closest('[data-dup]')) sh.splice(i + 1, 0, { ...sh[i], id: uid(), img: null });
     else if (e.target.closest('[data-mv]')) { const j = i + +e.target.closest('[data-mv]').dataset.mv; if (j < 0 || j >= sh.length) return; [sh[i], sh[j]] = [sh[j], sh[i]]; }
+    else if (e.target.closest('[data-rmimg]')) { if (!confirm('¿Quitar la imagen de este plano?')) return; imgDel(sh[i].img).catch(() => {}); sh[i].img = null; }
     else if (e.target.closest('[data-pick]')) {
       const [f] = await pickFiles('image/*'); if (!f) return;
       try { if (sh[i].img) imgDel(sh[i].img).catch(() => {}); sh[i].img = await storeImage(f); } catch (err) { toast(err.message); return; }
@@ -2027,7 +2028,7 @@ function mbBind() {
     if (k === 'replace') return mbReplaceImg(it);
     if (k === 'open') return mbOpenLink(it);
     if (k === 'refresh') return mbFetchLink(it);
-    if (k === 'view') { const src = await imgGet(it.img); const lb = $('#lightbox'); lb.innerHTML = `<img src="${src}" alt="">`; lb.hidden = false; return; }
+    if (k === 'view') { openImage(await imgGet(it.img)); return; }
     mbHist();
     if (k === 'align') it.align = c.dataset.v;
     else if (k === 'dup') { const n = { ...JSON.parse(JSON.stringify(it)), id: uid(), x: it.x + 24, y: it.y + 24 }; items.push(n); MB.sel = n.id; }
@@ -2150,7 +2151,29 @@ document.addEventListener('paste', e => {
   if (text && text.split(/\s+/).every(w => normUrl(w) && /[./]/.test(w))) { e.preventDefault(); return mbAddLinks(urlsIn(text)); }
   if (text) { e.preventDefault(); const c = mbCenterPoint(); mbAdd({ id: uid(), type: 'text', text: text.slice(0, 600), x: Math.round(c.x - 160), y: Math.round(c.y - 20), w: 320, h: 40, rot: 0, font: 'sans', size: 20, color: '#2b2b2b', align: 'left' }); }
 });
-$('#lightbox').addEventListener('click', e => { if (e.target.closest('a')) return; const lb = $('#lightbox'); lb.hidden = true; lb.innerHTML = ''; });
+$('#lightbox').addEventListener('click', e => {
+  const lb = $('#lightbox');
+  if (e.target.closest('a')) return;
+  // clic en la imagen: zoom a tamaño real (y vuelta); clic fuera o ×: cerrar
+  if (e.target.matches('.lb-img') && !e.target.closest('.lb-x')) {
+    const im = e.target, r = im.getBoundingClientRect(), fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
+    lb.classList.toggle('zoom');
+    if (lb.classList.contains('zoom')) { lb.scrollLeft = im.offsetWidth * fx - innerWidth / 2; lb.scrollTop = im.offsetHeight * fy - innerHeight / 2; }
+    return;
+  }
+  lb.hidden = true; lb.innerHTML = ''; lb.classList.remove('zoom');
+});
+// ver en grande las imágenes de referencia (planos, plan de rodaje, lista completa)
+function openImage(src) {
+  if (!src) return;
+  const lb = $('#lightbox'); lb.classList.remove('zoom');
+  lb.innerHTML = `<img class="lb-img" src="${src}" alt="" title="Clic para ampliar"><button class="lb-x" title="Cerrar (Esc)">×</button>`; lb.hidden = false;
+}
+document.addEventListener('click', async e => {
+  const t = e.target.closest('[data-view], .thumb img[data-img], .ss-th img[data-img], .pr-thumb');
+  if (!t || e.target.closest('#mbBoard, [data-pick]')) return;
+  e.stopPropagation(); openImage(await imgGet(t.dataset.view || t.dataset.img));
+}, true);
 
 /* ---------- Descargar como imagen ---------- */
 function tornPath(g, id, w, h) {
