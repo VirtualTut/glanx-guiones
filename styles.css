@@ -508,3 +508,18 @@ body.ro #ed{caret-color:transparent}
 
 .newver{position:fixed;top:64px;left:50%;transform:translateX(-50%);z-index:95;background:var(--acc);color:var(--accink);font-weight:700;padding:8px 10px 8px 16px;border-radius:99px;display:flex;gap:10px;align-items:center;box-shadow:0 10px 30px rgba(0,0,0,.5)}
 .newver .btn{background:var(--accink);color:var(--acc);border-color:var(--accink)}
+
+/* planos ↔ guion */
+.shot-ex{max-height:260px;margin-bottom:12px;line-height:1.75}
+.shm{background:color-mix(in srgb,var(--c) 28%,transparent);border-bottom:2px solid var(--c);border-radius:2px;color:inherit;cursor:pointer;padding:0 1px}
+.shm.hl{background:color-mix(in srgb,var(--c) 60%,transparent);outline:1px solid var(--c)}
+.shl{background:var(--c);color:#111;font:800 9.5px var(--ui);border-radius:3px;padding:0 3px;margin-right:2px;vertical-align:super;line-height:1}
+.shots tr[data-i] td.shcode{border-left:4px solid var(--c)!important;color:var(--c)}
+.shots tr.flash td{animation:rowflash 1.3s}
+@keyframes rowflash{0%,40%{background:color-mix(in srgb,var(--c) 30%,var(--panel))}100%{background:var(--panel)}}
+.sh-parts{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
+.sh-part{display:inline-flex;align-items:center;gap:2px;font:12px var(--mono);background:color-mix(in srgb,var(--c) 14%,var(--bg));border:1px solid color-mix(in srgb,var(--c) 45%,transparent);border-radius:5px;padding:1px 2px 1px 6px;max-width:100%;overflow:hidden}
+.sh-part button{background:none;border:0;color:var(--dim);cursor:pointer;font-size:13px;padding:0 4px}
+.sh-part button:hover{color:var(--bad)}
+body.ro .sh-part button{display:none}
+@media print{.pr-q{font:italic 9pt var(--mono);color:#444;margin-top:2pt}}

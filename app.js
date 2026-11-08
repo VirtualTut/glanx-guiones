@@ -2,7 +2,7 @@
    Todo se guarda en este navegador (localStorage + IndexedDB para imágenes).
    Sin servidor, sin dependencias. */
 'use strict';
-const APP_V = '202611072020';
+const APP_V = '202611072038';
 
 /* ================= Utilidades ================= */
 const $ = (s, r = document) => r.querySelector(s);
@@ -886,7 +886,7 @@ function prDesglose(scenes) {
 }
 function prPlanos(scenes) {
   const out = scenes.filter(s => meta(s.id).shots.length).map(s => `<div class="pr-block"><h3>${s.num}. ${esc(s.heading)}</h3><table class="pr-table"><thead><tr><th>Plano</th><th>Tamaño</th><th>Lente</th><th>Movimiento</th><th>Descripción</th><th>Dur.</th><th>Ref.</th></tr></thead><tbody>
-    ${meta(s.id).shots.map((sh, i) => `<tr><td><b>${shotCode(s, i)}</b></td><td>${esc(sh.size)}</td><td>${esc(sh.lens)}</td><td>${esc(sh.move)}</td><td>${esc(sh.desc)}</td><td>${sh.dur ? esc(sh.dur) + ' s' : ''}</td><td>${sh.img ? `<img class="pr-thumb" data-img="${sh.img}" alt="">` : ''}</td></tr>`).join('')}</tbody></table></div>`).join('');
+    ${meta(s.id).shots.map((sh, i) => `<tr><td><b>${shotCode(s, i)}</b></td><td>${esc(sh.size)}</td><td>${esc(sh.lens)}</td><td>${esc(sh.move)}</td><td>${esc(sh.desc)}${shotParts(sh, Object.fromEntries(s.blocks.map(b => [b.id, b]))).map(p => `<div class="pr-q">«${esc(p.q)}»</div>`).join('')}</td><td>${sh.dur ? esc(sh.dur) + ' s' : ''}</td><td>${sh.img ? `<img class="pr-thumb" data-img="${sh.img}" alt="">` : ''}</td></tr>`).join('')}</tbody></table></div>`).join('');
   return out || '<p>Aún no hay planos.</p>';
 }
 function prRodaje(scenes) {
@@ -951,11 +951,11 @@ async function exportZip(secs, withJson) {
     z.file('desglose.csv', csv(rows));
   }
   if (secs.includes('planos')) {
-    const rows = [['Plano', 'Escena', 'Encabezado', 'Tamaño', 'Lente', 'Movimiento', 'Descripción', 'Duración (s)', 'Imagen']];
+    const rows = [['Plano', 'Escena', 'Encabezado', 'Tamaño', 'Lente', 'Movimiento', 'Descripción', 'Partes del guion', 'Duración (s)', 'Imagen']];
     for (const s of scenes) for (const [i, sh] of meta(s.id).shots.entries()) {
       let file = '';
       if (sh.img) { const d = await imgGet(sh.img); if (d) { file = `planos/${shotCode(s, i)}.${extOf(d)}`; z.file(file, dataPart(d), { base64: true }); } }
-      rows.push([shotCode(s, i), s.num, s.heading, sh.size, sh.lens, sh.move, sh.desc, sh.dur ? nf(sh.dur) : '', file]);
+      rows.push([shotCode(s, i), s.num, s.heading, sh.size, sh.lens, sh.move, sh.desc, shotParts(sh, Object.fromEntries(s.blocks.map(b => [b.id, b]))).map(p => p.q).join(' … '), sh.dur ? nf(sh.dur) : '', file]);
     }
     z.file('planos.csv', csv(rows));
   }
@@ -1437,13 +1437,17 @@ function renderPlanos() {
   else {
     const shots = meta(s.id).shots;
     const dur = shots.reduce((a, x) => a + num(x.dur), 0);
+    const byId = Object.fromEntries(s.blocks.map(b => [b.id, b]));
     body = `<div class="scene-head"><span class="num">${s.num}</span><h2>${esc(s.heading)}</h2>${s.time ? `<span class="pill ${s.night ? 'night' : 'day'}">${esc(s.time)}</span>` : ''}</div>
+      <p class="sub" style="margin:-6px 0 8px">${isRO() ? 'Las partes marcadas muestran qué cubre cada plano.' : 'Selecciona texto de la escena y elige a qué plano va (o crea uno nuevo con eso).'}</p>
+      <div class="excerpt script mini shot-ex" id="shotEx">${shotExcerpt(s)}</div>
       <div class="shots-wrap"><table class="shots"><thead><tr><th>Plano</th><th>Tamaño</th><th>Lente</th><th>Movimiento</th><th>Descripción</th><th>Dur. (s)</th><th>Ref.</th><th></th></tr></thead><tbody>
-      ${shots.map((sh, i) => `<tr data-i="${i}"><td>${shotCode(s, i)}</td>
+      ${shots.map((sh, i) => `<tr data-i="${i}" style="--c:${shotColor(i)}"><td class="shcode">${shotCode(s, i)}</td>
         <td style="width:170px"><select class="inp" data-f="size"><option value=""></option>${SIZES.map(o => `<option ${sh.size === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td>
         <td style="width:90px"><input class="inp" data-f="lens" value="${esc(sh.lens)}" placeholder="35mm" list="lenses"></td>
         <td style="width:160px"><select class="inp" data-f="move"><option value=""></option>${MOVES.map(o => `<option ${sh.move === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td>
-        <td style="min-width:220px"><input class="inp" data-f="desc" value="${esc(sh.desc)}" placeholder="Qué se ve, quién, acción…"></td>
+        <td style="min-width:220px"><input class="inp" data-f="desc" value="${esc(sh.desc)}" placeholder="Qué se ve, quién, acción…">
+          ${shotParts(sh, byId).length ? `<div class="sh-parts">${shotParts(sh, byId).map((pt, k) => `<span class="sh-part" title="${esc(pt.q)}">«${esc(pt.q.length > 60 ? pt.q.slice(0, 60) + '…' : pt.q)}»<button data-rmpart="${k}" title="Quitar del plano">×</button></span>`).join('')}</div>` : ''}</td>
         <td style="width:80px"><input class="inp" type="number" min="0" data-f="dur" value="${esc(sh.dur)}"></td>
         <td><div class="thumbw">${sh.img ? `<div class="thumb" data-view="${sh.img}" title="Ver en grande"><img data-img="${sh.img}" alt=""></div><span class="thumb-acts"><button class="iconbtn" data-pick title="Cambiar imagen">✎</button><button class="iconbtn" data-rmimg title="Quitar imagen">×</button></span>` : '<div class="thumb" data-pick title="Añadir imagen de referencia">+</div>'}</div></td>
         <td><button class="iconbtn" data-mv="-1" title="Subir">↑</button><button class="iconbtn" data-mv="1" title="Bajar">↓</button><button class="iconbtn" data-dup title="Duplicar">⧉</button><button class="iconbtn" data-x title="Borrar">×</button></td></tr>`).join('')}
@@ -1470,8 +1474,9 @@ function renderPlanos() {
     }
     const tr = e.target.closest('tr[data-i]'); if (!tr) return; const i = +tr.dataset.i; const sh = shotsOf();
     if (e.target.closest('[data-x]')) { if (sh[i].img) imgDel(sh[i].img).catch(() => {}); sh.splice(i, 1); }
-    else if (e.target.closest('[data-dup]')) sh.splice(i + 1, 0, { ...sh[i], id: uid(), img: null });
+    else if (e.target.closest('[data-dup]')) sh.splice(i + 1, 0, { ...sh[i], id: uid(), img: null, parts: [] });
     else if (e.target.closest('[data-mv]')) { const j = i + +e.target.closest('[data-mv]').dataset.mv; if (j < 0 || j >= sh.length) return; [sh[i], sh[j]] = [sh[j], sh[i]]; }
+    else if (e.target.closest('[data-rmpart]')) { const sc = getScenes().find(x => x.id === UI.sid); const byId = Object.fromEntries(sc.blocks.map(b => [b.id, b])); const keep = shotParts(sh[i], byId); keep.splice(+e.target.closest('[data-rmpart]').dataset.rmpart, 1); sh[i].parts = keep; }
     else if (e.target.closest('[data-rmimg]')) { if (!confirm('¿Quitar la imagen de este plano?')) return; imgDel(sh[i].img).catch(() => {}); sh[i].img = null; }
     else if (e.target.closest('[data-pick]')) {
       const [f] = await pickFiles('image/*'); if (!f) return;
@@ -1479,8 +1484,90 @@ function renderPlanos() {
     } else return;
     save(); keepScroll(renderPlanos);
   });
+  $('#shotEx')?.addEventListener('mouseup', () => setTimeout(showShotPop, 0));
+  const lightShot = (i, on) => { $$(`#shotEx .shm[data-sh~="${i}"]`).forEach(m => m.classList.toggle('hl', on)); $$('#shotEx .shl').forEach(l => {}); };
+  main.addEventListener('mouseover', e => { const tr = e.target.closest('tr[data-i]'); $$('#shotEx .shm.hl').forEach(m => m.classList.remove('hl')); if (tr) lightShot(tr.dataset.i, true); });
+  $('#shotEx')?.addEventListener('click', e => {
+    const m = e.target.closest('.shm'); if (!m || !getSelection().isCollapsed) return;
+    const i = m.dataset.sh.trim().split(' ').pop(); const tr = $(`tr[data-i="${i}"]`); if (!tr) return;
+    tr.scrollIntoView({ block: 'center', behavior: 'smooth' }); tr.classList.add('flash'); setTimeout(() => tr.classList.remove('flash'), 1400);
+  });
   const upd = e => { const tr = e.target.closest('tr[data-i]'); const f = e.target.dataset.f; if (!tr || !f) return; shotsOf()[+tr.dataset.i][f] = e.target.value; save(); };
   main.addEventListener('input', upd); main.addEventListener('change', e => { upd(e); if (e.target.dataset.f === 'dur') keepScroll(renderPlanos); });
+}
+/* ---- Planos ↔ guion: partes del texto de la escena asignadas a cada plano ---- */
+const SHOT_COLORS = ['#f2b544', '#4fc3f7', '#ef6f8e', '#7bd389', '#b39dff', '#ff9f5a', '#5ad1c6', '#e6d55a', '#ff7a7a', '#9fb6ff'];
+const shotColor = i => SHOT_COLORS[i % SHOT_COLORS.length];
+// devuelve las partes vigentes (si el texto cambió, se busca la frase; si ya no está, se descarta)
+function shotParts(sh, byId) {
+  return (sh.parts || []).map(pt => {
+    const x = byId[pt.b]?.x; if (x == null) return null;
+    if (x.slice(pt.s, pt.e) === pt.q) return pt;
+    const k = x.indexOf(pt.q); return k >= 0 ? { ...pt, s: k, e: k + pt.q.length } : null;
+  }).filter(Boolean);
+}
+function shotExcerpt(s) {
+  const shots = meta(s.id).shots, byId = Object.fromEntries(s.blocks.map(b => [b.id, b]));
+  const ranges = {}; // por bloque: [s, e, i]
+  shots.forEach((sh, i) => shotParts(sh, byId).forEach(pt => (ranges[pt.b] ||= []).push([pt.s, pt.e, i])));
+  const blocks = s.blocks.filter(b => b.x.trim());
+  if (!blocks.length) return '<span style="color:#888">(Escena sin texto)</span>';
+  return blocks.map(b => {
+    const x = upT(b), rs = ranges[b.id] || [];
+    const cuts = [...new Set([0, x.length, ...rs.flatMap(r => [r[0], r[1]])])].sort((a, c) => a - c);
+    let h = '';
+    for (let k = 0; k < cuts.length - 1; k++) {
+      const a = cuts[k], c = cuts[k + 1], on = rs.filter(r => r[0] <= a && r[1] >= c).map(r => r[2]);
+      const starts = rs.filter(r => r[0] === a).map(r => r[2]);
+      const lab = starts.map(i => `<sup class="shl" style="--c:${shotColor(i)}">${shotCode(s, i)}</sup>`).join('');
+      const t = esc(x.slice(a, c));
+      h += lab + (on.length ? `<mark class="shm" data-sh=" ${on.join(' ')} " style="--c:${shotColor(on[on.length - 1])}">${t}</mark>` : t);
+    }
+    return `<div class="el" data-t="${b.t}" data-bid="${b.id}">${h}</div>`;
+  }).join('');
+}
+// posición dentro del texto del bloque, sin contar las etiquetas 1A, 1B…
+function textOffset(el, node, off) {
+  const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT); let n, sum = 0;
+  if (node.nodeType !== 3) { const r = document.createRange(); r.setStart(node, off); r.collapse(true); while ((n = w.nextNode())) { if (n.parentElement.closest('.shl')) continue; if (r.comparePoint(n, 0) >= 0) return sum; sum += n.length; } return sum; }
+  while ((n = w.nextNode())) { if (n === node) return sum + (n.parentElement.closest('.shl') ? 0 : off); if (!n.parentElement.closest('.shl')) sum += n.length; }
+  return sum;
+}
+function selectionParts() {
+  const sel = getSelection(), ex = $('#shotEx'); if (!ex || !sel.rangeCount || sel.isCollapsed) return [];
+  const r = sel.getRangeAt(0), out = [];
+  $$('.el', ex).forEach(el => {
+    if (!r.intersectsNode(el)) return;
+    const b = P.blocks.find(x => x.id === el.dataset.bid); if (!b) return;
+    let s = el.contains(r.startContainer) ? textOffset(el, r.startContainer, r.startOffset) : 0;
+    let e = el.contains(r.endContainer) ? textOffset(el, r.endContainer, r.endOffset) : b.x.length;
+    while (s < e && /\s/.test(b.x[s])) s++; while (e > s && /\s/.test(b.x[e - 1])) e--;
+    if (e > s) out.push({ b: b.id, s, e, q: b.x.slice(s, e) });
+  });
+  return out;
+}
+function showShotPop() {
+  const pop = $('#tagpop'); if (isRO()) return hideTagpop();
+  const parts = selectionParts(); if (!parts.length) return hideTagpop();
+  const sc = getScenes().find(x => x.id === UI.sid); if (!sc) return;
+  const shots = meta(sc.id).shots, r = getSelection().getRangeAt(0).getBoundingClientRect();
+  const q = parts.map(p => p.q).join(' … ');
+  pop.innerHTML = `<b>Asignar «${esc(q.length > 50 ? q.slice(0, 50) + '…' : q)}» a:</b>` + shots.map((sh, i) => `<button style="--c:${shotColor(i)}" data-tosh="${i}">${shotCode(sc, i)}${sh.size ? ' · ' + esc(sh.size) : ''}</button>`).join('') + `<button style="--c:#8e909b" data-tosh="new">+ Nuevo plano</button>`;
+  pop.hidden = false;
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  pop.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.left + r.width / 2 - w / 2)) + 'px';
+  pop.style.top = (r.top - h - 8 < 60 ? r.bottom + 8 : r.top - h - 8) + 'px';
+  pop.onmousedown = e => e.preventDefault();
+  pop.onclick = e => {
+    const t = e.target.closest('[data-tosh]'); if (!t) return;
+    let i = t.dataset.tosh;
+    if (i === 'new') { const last = shots[shots.length - 1]; shots.push({ id: uid(), size: '', lens: last?.lens || '', move: '', desc: q.length <= 140 ? q : q.slice(0, 137) + '…', dur: '', img: null, parts: [] }); i = shots.length - 1; }
+    const sh = shots[+i]; sh.parts ||= [];
+    parts.forEach(p => { if (!sh.parts.some(o => o.b === p.b && o.s === p.s && o.e === p.e)) sh.parts.push(p); });
+    if (!sh.desc) sh.desc = q.length <= 140 ? q : q.slice(0, 137) + '…';
+    hideTagpop(); getSelection().removeAllRanges(); save(); keepScroll(renderPlanos);
+    toast(`Asignado a ${shotCode(sc, +i)}`);
+  };
 }
 const fmtDur = s => { s = Math.round(s); return s >= 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s} s`; };
 
