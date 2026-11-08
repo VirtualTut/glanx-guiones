@@ -423,3 +423,46 @@ table.sum th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:
   .excerpt{max-height:none;border:1px solid #bbb}
 }
 @media (max-width:900px){.ss-row{grid-template-columns:40px 1fr 1fr}.ss-row .ss-desc{grid-column:1/-1}.ss-th{display:none}.toolbar .type-btn{min-width:140px}.toolbar .hint{display:none}}
+
+/* ---------- Nube: equipo, turno de edición y comentarios ---------- */
+.user-btn{flex:none}
+.user-btn.on{border-color:var(--ok);color:var(--ok)}
+.pcard.cloud{border-color:#2d4a3a}
+.lockpill{font-size:12px;color:var(--acc);font-weight:600}
+.cloud-bar{position:fixed;left:16px;bottom:16px;z-index:45;display:flex;align-items:center;gap:10px;background:var(--panel2);border:1px solid var(--line2);border-radius:99px;padding:6px 8px 6px 14px;font-size:12.5px;box-shadow:0 8px 26px rgba(0,0,0,.45);max-width:calc(100vw - 32px)}
+.cloud-bar .dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
+.cloud-bar .dot.ed{background:var(--ok);box-shadow:0 0 0 3px rgba(63,191,127,.25)}
+.cloud-bar .dot.ro{background:var(--acc)} .cloud-bar .dot.free{background:#6aa0ff}
+#cmtBtn b{background:var(--acc);color:var(--accink);border-radius:99px;padding:0 6px;margin-left:3px;font-size:11px}
+.cmt{position:fixed;top:56px;right:0;bottom:0;width:360px;max-width:100vw;z-index:44;background:var(--panel);border-left:1px solid var(--line2);display:flex;flex-direction:column;box-shadow:-10px 0 30px rgba(0,0,0,.35)}
+body.cmt-open #app{margin-right:360px}
+.cm-h{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.cm-h label{font-size:12px;display:flex;gap:4px;align-items:center}
+.cm-new{padding:12px 14px;border-bottom:1px solid var(--line)}
+.cm-where{font-size:11.5px;color:var(--acc);font-weight:600;margin-bottom:5px;display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.cm-where q{display:block;width:100%;color:var(--muted);font:italic 12px var(--mono);border-left:2px solid var(--acc);padding-left:6px;quotes:'«' '»'}
+.cm-where.link{cursor:pointer} .cm-where.link:hover{text-decoration:underline}
+.cm-list{flex:1;overflow:auto;padding:8px 10px 40px}
+.cm{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px 11px;margin-bottom:8px}
+.cm.res{opacity:.55}
+.cm-body{font-size:13.5px;line-height:1.45;white-space:pre-wrap;word-wrap:break-word}
+.cm-meta{font-size:11.5px;color:var(--muted);margin-top:4px}
+.cm-meta a,.cm-acts a{cursor:pointer;color:var(--muted)} .cm-meta a:hover,.cm-acts a:hover{color:var(--tx)}
+.cm-reply{margin:8px 0 0 10px;padding-left:9px;border-left:2px solid var(--line2)}
+.cm-acts{display:flex;gap:14px;margin-top:8px;font-size:12px}
+.cmtpop{position:fixed;z-index:62;background:var(--acc);color:var(--accink);border:0;border-radius:99px;padding:5px 11px;font-weight:700;font-size:12px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.4)}
+.script .el.has-cmt{background:linear-gradient(90deg,rgba(242,181,68,.28),rgba(242,181,68,.06) 60%,transparent);border-radius:2px}
+.script .el.flash{animation:flash 1.5s}
+@keyframes flash{0%,40%{background:rgba(242,181,68,.6)}100%{background:transparent}}
+.mem{display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}
+.mem>span:first-child{flex:1;overflow:hidden;text-overflow:ellipsis}
+/* modo lectura: se ve todo, no se cambia nada */
+body.ro #app .main :is(input,select,textarea),body.ro .proj-title{pointer-events:none}
+body.ro #app :is([data-addshot],[data-additem],[data-adddept],[data-deldept],[data-xi],[data-dup],[data-mv],[data-rm],[data-addday],[data-delday],[data-dmv],[data-sortloc],[data-frombd],[data-fit],[data-unfit],[data-tobudget],tr [data-x],.bd-cat input,.mb-bar,.mb-ctx){display:none!important}
+body.ro #app [data-pick]{pointer-events:none}
+body.ro .strip{cursor:default}
+body.ro .toolbar :is(.tsel,.fmt){opacity:.4;pointer-events:none}
+body.ro .mb-stage{pointer-events:none}
+body.ro #ed{caret-color:transparent}
+@media (max-width:900px){body.cmt-open #app{margin-right:0}.cloud-bar{left:8px;right:8px;bottom:8px;border-radius:12px}}
+@media print{.cloud-bar,.cmt,.cmtpop,.user-btn,#cmtBtn,#shareBtn{display:none!important}body.cmt-open #app{margin-right:0}.script .el.has-cmt{background:none}}

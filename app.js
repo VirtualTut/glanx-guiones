@@ -61,7 +61,7 @@ function loadProject(id) { try { return normalizeProject(JSON.parse(localStorage
 function writeProject(p) {
   localStorage.setItem(PKEY(p.id), JSON.stringify(p));
   const l = loadIndex().filter(x => x.id !== p.id);
-  l.unshift({ id: p.id, title: p.title, updated: p.updated });
+  l.unshift({ id: p.id, title: p.title, updated: p.updated, cloud: !!p.cloud });
   saveIndex(l);
 }
 let P = null, saveTimer = null;
@@ -69,10 +69,10 @@ function setSaved(txt, bad) { const s = $('#saveState'); if (s) { s.textContent 
 function persist() {
   saveTimer = null; if (!P) return;
   P.updated = Date.now();
-  try { writeProject(P); setSaved('Guardado en este navegador'); }
+  try { writeProject(P); setSaved(P.cloud ? 'Guardado' : 'Guardado en este navegador'); cloudAfterSave(); }
   catch (e) { setSaved('No se pudo guardar', true); toast('No se pudo guardar: el navegador está lleno. Exporta un respaldo.'); }
 }
-function save() { setSaved('Guardando…'); clearTimeout(saveTimer); saveTimer = setTimeout(persist, 450); }
+function save() { if (isRO()) { roWarn(); return; } setSaved('Guardando…'); clearTimeout(saveTimer); saveTimer = setTimeout(persist, 450); }
 function flushSave() { if (saveTimer) { clearTimeout(saveTimer); persist(); } }
 
 /* Imágenes en IndexedDB */
@@ -96,7 +96,9 @@ const imgCache = new Map();
 async function imgGet(id) {
   if (!id) return null;
   if (imgCache.has(id)) return imgCache.get(id);
-  try { const d = await idb('readonly', s => s.get(id)); if (d) imgCache.set(id, d); return d || null; } catch { return null; }
+  let d = null; try { d = await idb('readonly', s => s.get(id)); } catch {}
+  if (!d && P?.cloud && CL.user) { d = await cloudGetImg(P.id, id).catch(() => null); if (d) imgPut(id, d).catch(() => {}); }
+  if (d) imgCache.set(id, d); return d || null;
 }
 function hydrate(root = app) {
   $$('img[data-img]', root).forEach(async im => { const d = await imgGet(im.dataset.img); if (d) im.src = d; });
@@ -114,7 +116,11 @@ function fileToDataUrl(file, max = 1600) {
     im.src = url;
   });
 }
-async function storeImage(file) { const d = await fileToDataUrl(file); const id = 'i' + uid(); await imgPut(id, d); imgCache.set(id, d); return id; }
+async function storeImage(file) {
+  const d = await fileToDataUrl(file); const id = 'i' + uid(); await imgPut(id, d); imgCache.set(id, d);
+  if (P?.cloud && CL.editing) cloudPutImg(P.id, id, d).catch(() => {});
+  return id;
+}
 
 /* ================= Modelo ================= */
 function normalizeProject(p) {
@@ -568,10 +574,17 @@ function route() {
   syncNow(); flushSave();
   const m = location.hash.match(/^#\/p\/([^/]+)(?:\/(\w+))?/);
   if (m) {
-    if (!P || P.id !== m[1]) { P = loadProject(m[1]); UI.sid = null; }
+    if (!P || P.id !== m[1]) {
+      if (CL.pid && CL.pid !== m[1]) cloudLeave();
+      P = loadProject(m[1]); UI.sid = null;
+      if ((!P || P.cloud) && CL.pid !== m[1]) {
+        cloudOpen(m[1]);
+        if (!P) { document.body.classList.add('in-project'); app.innerHTML = '<p class="muted pad">Abriendo el guion de la nube…</p>'; return; }
+      }
+    }
     if (!P) { location.hash = '#/'; return; }
     UI.view = VIEWS[m[2]] ? m[2] : 'guion';
-  } else P = null;
+  } else { P = null; cloudLeave(); }
   render();
 }
 function render() {
@@ -581,8 +594,10 @@ function render() {
   document.title = `${P.title} · Glanx Guiones`;
   $('#projTitle').value = P.title;
   $$('#tabs a').forEach(a => { a.classList.toggle('on', a.dataset.view === UI.view); a.href = `#/p/${P.id}/${a.dataset.view}`; });
-  setSaved(P.updated ? 'Guardado en este navegador' : '');
+  setSaved(P.cloud ? (CL.editing ? 'Guardado en la nube' : '') : P.updated ? 'Guardado en este navegador' : '');
+  document.body.classList.toggle('ro', isRO()); $('#projTitle').readOnly = isRO();
   VIEWS[UI.view]();
+  cloudBar(); markCommented(); if (CL.open) cmtRender();
 }
 window.addEventListener('hashchange', route);
 window.addEventListener('beforeunload', () => { syncNow(); flushSave(); });
@@ -590,7 +605,8 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) { syn
 
 /* ================= Inicio ================= */
 function renderHome() {
-  const list = loadIndex();
+  const list = loadIndex().filter(x => !x.cloud);
+  setTimeout(cloudHome, 0);
   app.innerHTML = `<div class="home">
     <div class="hero">
       <h1>Del guion <span>al rodaje.</span></h1>
@@ -609,12 +625,15 @@ function renderHome() {
       <div><b>Presupuesto</b><span>Previsto contra real por departamento</span></div>
       <div><b>Moodboard</b><span>Referencias de Flow, Higgsfield o Pinterest</span></div>
     </div>
+    <div class="row"><h2 style="margin:0;font-size:18px">En la nube (equipo)</h2><span class="muted" id="cloudCount"></span></div>
+    <div id="cloudBox" style="margin-bottom:30px"><p class="muted">Conectando…</p></div>
     <div class="row"><h2 style="margin:0;font-size:18px">Guiones en este navegador</h2><span class="muted">${list.length}</span></div>
     <div class="plist">${list.map(p => `
       <div class="pcard" data-open="${p.id}">
         <h3>${esc(p.title)}</h3>
         <div class="meta">Editado ${fmtDate(p.updated)}</div>
         <div class="acts">
+          <button class="btn sm" data-up="${p.id}" hidden>Subir a la nube</button>
           <button class="btn sm" data-dup="${p.id}">Duplicar</button>
           <button class="btn sm danger" data-del="${p.id}">Borrar</button>
         </div>
@@ -622,7 +641,7 @@ function renderHome() {
     </div>
     <div class="note" id="dropHome"><b>Importar:</b> PDF, Word (.docx), Final Draft (.fdx), Fountain, .txt o un respaldo .json. Puedes arrastrar el archivo aquí.<br>
       ¿Está en <b>Google Docs</b>? Ábrelo y ve a <b>Archivo › Descargar › Microsoft Word (.docx)</b> o <b>PDF</b>, y luego impórtalo.</div>
-    <div class="note"><b>Dónde se guarda:</b> los guiones viven solo en este navegador y en este equipo, no en internet. Para pasarlos a otra persona o guardar una copia, usa <b>Exportar › Respaldo completo (.json)</b> y súbelo a Drive; la otra persona lo abre con <b>Importar archivo</b>.</div>
+    <div class="note"><b>Dónde se guarda:</b> los guiones de «En la nube» se guardan en internet y los ven tus socios. Los de «En este navegador» viven solo en este equipo. Para pasarlos a otra persona o guardar una copia, usa <b>Exportar › Respaldo completo (.json)</b> y súbelo a Drive; la otra persona lo abre con <b>Importar archivo</b>.</div>
   </div>`;
 }
 app.addEventListener('click', async e => {
@@ -659,7 +678,7 @@ function imageRefs(p) {
 }
 const imageIds = p => [...new Set(imageRefs(p).map(r => r.img))];
 async function cloneProject(src, title) {
-  const p = normalizeProject(JSON.parse(JSON.stringify(src))); p.id = uid(); p.title = title; p.updated = Date.now();
+  const p = normalizeProject(JSON.parse(JSON.stringify(src))); p.id = uid(); p.title = title; p.updated = Date.now(); delete p.cloud;
   const map = {};
   for (const r of imageRefs(p)) {
     if (!map[r.img]) { const d = await imgGet(r.img); map[r.img] = d ? 'i' + uid() : null; if (d) await imgPut(map[r.img], d); }
@@ -701,7 +720,7 @@ async function importFile(f) {
     const text = await f.text();
     if (/\.json$/i.test(f.name)) {
       const data = JSON.parse(text); if (!data.project) throw new Error('No es un respaldo de Glanx Guiones');
-      let p = normalizeProject(data.project);
+      let p = normalizeProject(data.project); if (p) delete p.cloud;
       for (const [id, d] of Object.entries(data.images || {})) { await imgPut(id, d); imgCache.set(id, d); }
       if (loadIndex().some(x => x.id === p.id) && !confirm(`"${p.title}" ya existe en este navegador.\n\nAceptar = reemplazarlo con el respaldo\nCancelar = importarlo como copia`)) p = await cloneProject(p, p.title + ' (importado)');
       writeProject(p); location.hash = `#/p/${p.id}/guion`; toast('Respaldo importado');
@@ -943,6 +962,7 @@ function renderGuion() {
     </section></div>`;
   const ed = $('#ed');
   ed.innerHTML = P.blocks.map(blockHTML).join('');
+  if (isRO()) ed.contentEditable = 'false';
   refreshSide();
   bindSide(sid => {
     const el = ed.querySelector(`[data-id="${sid}"]`); if (!el) return;
@@ -1252,6 +1272,7 @@ function highlight(text, terms) {
   return out + esc(text.slice(last));
 }
 function showTagpop() {
+  if (isRO()) return hideTagpop();
   const sel = getSelection(); const txt = sel.toString().trim().replace(/\s+/g, ' ');
   const pop = $('#tagpop');
   if (!txt || txt.length > 60 || !sel.rangeCount) { hideTagpop(); return; }
@@ -1414,7 +1435,7 @@ function renderRodaje() {
   const assigned = new Set(P.days.flatMap(d => d.scenes));
   const pool = scenes.filter(s => !assigned.has(s.id));
   const dayOpts = sid => `<select class="inp" data-move="${sid}" title="Mover a…"><option value="">Sin asignar</option>${P.days.map((d, i) => `<option value="${d.id}" ${d.scenes.includes(sid) ? 'selected' : ''}>Día ${i + 1}</option>`).join('')}</select>`;
-  const strip = s => `<div class="strip ${stripClass(s)}" draggable="true" data-sid="${s.id}">
+  const strip = s => `<div class="strip ${stripClass(s)}" draggable="${!isRO()}" data-sid="${s.id}">
     <span class="grip">⋮⋮</span><span class="n">${s.num}</span><span>${s.ie || '—'}</span><span class="loc" title="${esc(s.heading)}">${esc(s.loc)}</span>
     <span class="time-c">${esc(s.time) || '—'}</span><span>${fmtE(s.eighths)}</span><span class="chars">${esc(s.chars.join(', '))}</span>
     ${meta(s.id).shots.length ? `<button class="shots-b ${openShots.has(s.id) ? 'on' : ''}" data-shots="${s.id}" title="Ver los planos de la escena">${meta(s.id).shots.length} planos ${openShots.has(s.id) ? '▴' : '▾'}</button>` : `<button class="shots-b none" data-goshot="${s.id}" title="Añadir planos en la pestaña Planos">+ planos</button>`}
@@ -2224,6 +2245,423 @@ async function mbRenderCanvas(cv, board, S = 2) {
   }
   return c;
 }
+
+/* ================= NUBE (Supabase): cuentas, guiones compartidos, turno de edición y comentarios =================
+   Un guion en la nube lo edita una sola persona a la vez (turno). Los demás lo ven en modo lectura, en vivo, y comentan. */
+const SB_URL = 'https://egjzkvlcqqwqxcugsfed.supabase.co', SB_KEY = 'sb_publishable_4LS7xS-Tzm39nRtrFptIFQ_L3FahX4Q';
+LIBS.sb = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js';
+const CL = { sb: null, user: null, token: null, ready: null, pid: null, row: null, role: null, editing: false, chan: null, beat: null, pushT: null, comments: [], showRes: false, draft: null, reply: null, lastAct: 0, open: false };
+const isRO = () => !!(P && P.cloud && !CL.editing);
+const myName = () => CL.user?.user_metadata?.name || CL.user?.email?.split('@')[0] || 'Alguien';
+const LOCK_TTL = 90e3, IDLE_MAX = 10 * 60e3;
+const lockFresh = r => !!(r?.lock_user && Date.now() - new Date(r.lock_at).getTime() < LOCK_TTL);
+['pointerdown', 'keydown'].forEach(ev => document.addEventListener(ev, () => CL.lastAct = Date.now(), true));
+
+function cloudInit() {
+  return CL.ready ||= (async () => {
+    try { await loadScript(LIBS.sb); } catch { return null; }
+    CL.sb = supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: true, storageKey: 'glanx.auth' } });
+    const { data } = await CL.sb.auth.getSession();
+    CL.user = data.session?.user || null; CL.token = data.session?.access_token || null;
+    CL.sb.auth.onAuthStateChange((ev, s) => {
+      const before = CL.user?.id; CL.user = s?.user || null; CL.token = s?.access_token || null;
+      userBtn();
+      if (before !== CL.user?.id) { if (!P) renderHome(); else if (P.cloud) { cloudLeave(); P = null; location.hash = '#/'; route(); } }
+    });
+    userBtn();
+    return CL.sb;
+  })();
+}
+function userBtn() {
+  const b = $('#userBtn'); if (!b) return;
+  b.textContent = CL.user ? '● ' + myName() : 'Entrar'; b.classList.toggle('on', !!CL.user);
+  b.title = CL.user ? CL.user.email : 'Entra para trabajar en equipo';
+  topButtons();
+}
+function topButtons() {
+  const s = $('#shareBtn'), c = $('#cmtBtn'); if (!s) return;
+  const cloud = !!P?.cloud;
+  s.hidden = !P || !CL.user || (cloud && !CL.row);
+  s.textContent = cloud ? 'Compartir' : 'Subir a la nube';
+  c.hidden = !cloud;
+  const n = CL.comments.filter(x => !x.parent_id && !x.resolved).length;
+  c.innerHTML = `💬${n ? ` <b>${n}</b>` : ''}`; c.title = 'Comentarios';
+}
+const AUTH_ERR = m => /invalid login/i.test(m) ? 'Correo o contraseña incorrectos.' : /already registered|already exists/i.test(m) ? 'Ese correo ya tiene cuenta: entra con tu contraseña.'
+  : /at least 6|password should/i.test(m) ? 'La contraseña debe tener al menos 6 caracteres.' : /not confirmed/i.test(m) ? 'Falta confirmar el correo (revisa tu bandeja).'
+  : /rate limit|too many/i.test(m) ? 'Demasiados intentos: espera un momento.' : /valid email|invalid email/i.test(m) ? 'Ese correo no es válido.' : m;
+async function loginDialog(msg) {
+  if (!(await cloudInit())) return toast('No se pudo conectar (revisa internet)');
+  const d = $('#dialog'); let signup = false;
+  d.innerHTML = `<div class="dialog"><h3 id="lTitle">Entrar</h3>${msg ? `<p class="muted" style="margin:-6px 0 6px">${esc(msg)}</p>` : ''}
+    <div id="lNameWrap" hidden><label>Tu nombre (lo verán tus socios)</label><input class="inp" id="lName" autocomplete="name"></div>
+    <label>Correo</label><input class="inp" id="lEmail" type="email" autocomplete="email">
+    <label>Contraseña</label><input class="inp" id="lPass" type="password" autocomplete="current-password">
+    <p id="lErr" style="color:var(--bad);min-height:1.2em;margin:8px 0 0;font-size:13px"></p>
+    <div class="row"><button class="btn ghost" data-mode>¿No tienes cuenta? Crear una</button><span class="spacer"></span><button class="btn" data-x>Cancelar</button><button class="btn pri" data-ok>Entrar</button></div></div>`;
+  d.hidden = false; $('#lEmail').focus();
+  const submit = async () => {
+    const email = $('#lEmail').value.trim().toLowerCase(), password = $('#lPass').value, name = $('#lName').value.trim();
+    if (!email || !password) { $('#lErr').textContent = 'Escribe tu correo y contraseña.'; return; }
+    if (signup && !name) { $('#lErr').textContent = 'Escribe tu nombre.'; return; }
+    $('#lErr').textContent = ''; $('[data-ok]', d).disabled = true;
+    const r = signup ? await CL.sb.auth.signUp({ email, password, options: { data: { name } } }) : await CL.sb.auth.signInWithPassword({ email, password });
+    $('[data-ok]', d).disabled = false;
+    if (r.error) { $('#lErr').textContent = AUTH_ERR(r.error.message); return; }
+    if (signup && !r.data.session) { $('#lErr').style.color = 'var(--ok)'; $('#lErr').textContent = 'Cuenta creada. Te llegó un correo para confirmarla: ábrelo y luego entra aquí.'; return; }
+    d.hidden = true; toast(signup ? `¡Bienvenido, ${name}!` : 'Sesión iniciada');
+  };
+  d.onclick = e => {
+    if (e.target === d || e.target.closest('[data-x]')) { d.hidden = true; return; }
+    if (e.target.closest('[data-mode]')) {
+      signup = !signup; $('#lNameWrap').hidden = !signup; $('#lTitle').textContent = signup ? 'Crear cuenta' : 'Entrar';
+      e.target.closest('[data-mode]').textContent = signup ? 'Ya tengo cuenta' : '¿No tienes cuenta? Crear una';
+      $('[data-ok]', d).textContent = signup ? 'Crear cuenta' : 'Entrar'; $('#lPass').autocomplete = signup ? 'new-password' : 'current-password'; $('#lErr').textContent = '';
+      (signup ? $('#lName') : $('#lEmail')).focus(); return;
+    }
+    if (e.target.closest('[data-ok]')) submit();
+  };
+  d.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } };
+}
+function accountDialog() {
+  const d = $('#dialog');
+  d.innerHTML = `<div class="dialog"><h3>${esc(myName())}</h3><p class="muted" style="margin:0">${esc(CL.user.email)}</p>
+    <p class="muted" style="font-size:12.5px">Tus guiones de la nube están en la página de inicio, en «En la nube».</p>
+    <div class="row"><button class="btn danger" data-out>Cerrar sesión</button><span class="spacer"></span><button class="btn pri" data-x>Listo</button></div></div>`;
+  d.hidden = false;
+  d.onclick = async e => {
+    if (e.target === d || e.target.closest('[data-x]')) { d.hidden = true; return; }
+    if (e.target.closest('[data-out]')) { d.hidden = true; await cloudLeave(); await CL.sb.auth.signOut(); toast('Sesión cerrada'); location.hash = '#/'; }
+  };
+}
+
+/* ---- imágenes en la nube ---- */
+async function cloudPutImg(pid, id, dataUrl) {
+  if (!CL.sb || !CL.user) return;
+  const blob = await (await fetch(dataUrl)).blob();
+  const { error } = await CL.sb.storage.from('img').upload(`${pid}/${id}`, blob, { contentType: blob.type, upsert: false });
+  if (error && !/exists|duplicate/i.test(error.message)) console.warn('img', error.message);
+}
+async function cloudGetImg(pid, id) {
+  if (!CL.sb || !CL.user) return null;
+  const { data } = await CL.sb.storage.from('img').download(`${pid}/${id}`);
+  if (!data) return null;
+  return new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => res(null); r.readAsDataURL(data); });
+}
+
+/* ---- lista y subida ---- */
+async function cloudList() {
+  const { data, error } = await CL.sb.from('projects').select('id,title,owner,owner_email,updated_at,updated_by_name,lock_user,lock_name,lock_at').order('updated_at', { ascending: false });
+  if (error) throw error; return data;
+}
+async function cloudHome() {
+  const box = $('#cloudBox'); if (!box) return;
+  const sb = await cloudInit();
+  if (!$('#cloudBox')) return;
+  if (!sb) { box.innerHTML = '<p class="muted">No se pudo conectar con la nube (revisa internet).</p>'; return; }
+  if (!CL.user) {
+    box.innerHTML = `<div class="note" style="margin:10px 0 0"><b>Trabajar en equipo:</b> entra con tu cuenta para abrir los guiones que compartes con tus socios, dejar comentarios y ver los cambios en vivo. <button class="btn sm pri" data-login style="margin-left:6px">Entrar o crear cuenta</button></div>`;
+    $$('[data-up]').forEach(b => b.hidden = true); return;
+  }
+  $$('[data-up]').forEach(b => b.hidden = false);
+  try {
+    const list = await cloudList(); if (!$('#cloudBox')) return;
+    $('#cloudCount').textContent = list.length;
+    box.innerHTML = `<div class="plist">${list.map(p => `<div class="pcard cloud" data-copen="${p.id}">
+        <h3>${esc(p.title)}</h3>
+        <div class="meta">${p.owner === CL.user.id ? 'Tuyo' : 'De ' + esc(p.owner_email || '—')} · editado ${fmtDate(p.updated_at)}${p.updated_by_name ? ' por ' + esc(p.updated_by_name) : ''}</div>
+        ${lockFresh(p) ? `<div class="lockpill">✎ ${p.lock_user === CL.user.id ? 'Lo estás editando tú' : esc(p.lock_name || 'Alguien') + ' está editando'}</div>` : ''}
+        <div class="acts">${p.owner === CL.user.id ? `<button class="btn sm danger" data-cdel="${p.id}">Borrar de la nube</button>` : ''}</div></div>`).join('')
+      || '<p class="muted">Aún no hay guiones en la nube. Abre uno de este navegador y pulsa «Subir a la nube», o súbelo desde su tarjeta.</p>'}</div>`;
+  } catch (e) { box.innerHTML = `<p class="muted">No se pudo leer la nube: ${esc(e.message)}</p>`; }
+}
+async function cloudUpload(id) {
+  if (!CL.user) return loginDialog('Entra para subir el guion a la nube.');
+  syncNow(); flushSave();
+  const p = loadProject(id); if (!p) return;
+  if (!confirm(`¿Subir «${p.title}» a la nube? Luego podrás compartirlo con tus socios.`)) return;
+  toast('Subiendo a la nube…');
+  p.cloud = true;
+  const { error } = await CL.sb.from('projects').insert({ id: p.id, owner: CL.user.id, owner_email: CL.user.email, title: p.title, data: p,
+    updated_by: CL.user.id, updated_by_name: myName(), lock_user: CL.user.id, lock_name: myName(), lock_at: new Date().toISOString() });
+  if (error) { toast('No se pudo subir: ' + error.message); return; }
+  for (const img of imageIds(p)) { const d = await imgGet(img); if (d) await cloudPutImg(p.id, img, d).catch(() => {}); }
+  writeProject(p);
+  if (P?.id === p.id) { P = null; CL.pid = null; route(); } else location.hash = `#/p/${p.id}/guion`;
+  toast('Listo: el guion está en la nube. Usa «Compartir» para invitar a tus socios.');
+}
+
+/* ---- abrir, turno de edición, guardar ---- */
+async function cloudOpen(id) {
+  await cloudInit();
+  if (!CL.user) { loginDialog('Este guion está en la nube: entra para abrirlo.'); if (!P) location.hash = '#/'; return; }
+  CL.pid = id; CL.editing = false; CL.row = null; CL.comments = [];
+  const { data, error } = await CL.sb.from('projects').select('*').eq('id', id).maybeSingle();
+  if (CL.pid !== id) return;
+  if (error || !data) {
+    CL.pid = null;
+    if (P?.id === id) { delete P.cloud; writeProject(P); toast('Este guion ya no está en la nube o no te lo compartieron: queda solo en este navegador.'); render(); }
+    else { toast('No tienes acceso a ese guion'); location.hash = '#/'; }
+    return;
+  }
+  CL.role = data.owner === CL.user.id ? 'owner' : (await CL.sb.rpc('project_role', { pid: id })).data || 'viewer';
+  applyRow(data);
+  CL.chan = CL.sb.channel('p-' + id)
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'projects', filter: `id=eq.${id}` }, ev => onRemoteRow(ev.new))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'comments', filter: `project_id=eq.${id}` }, () => loadComments())
+    .subscribe();
+  loadComments();
+  if (CL.role !== 'viewer') await tryLock(true); else rerender();
+  clearInterval(CL.tick); CL.tick = setInterval(cloudTick, 15e3);
+}
+function applyRow(row) {
+  CL.row = row;
+  const p = normalizeProject(row.data); p.cloud = true; p.title = row.title || p.title; p.updated = new Date(row.updated_at).getTime();
+  P = p; writeProject(P);
+}
+async function refetch() {
+  const { data } = await CL.sb.from('projects').select('*').eq('id', CL.pid).maybeSingle();
+  if (data && P?.id === data.id) { applyRow(data); return true; }
+  return false;
+}
+async function onRemoteRow(row) {
+  if (!CL.row || row.id !== CL.pid) return;
+  const changed = row.updated_at !== CL.row.updated_at && row.updated_by !== CL.user.id;
+  Object.assign(CL.row, { lock_user: row.lock_user, lock_name: row.lock_name, lock_at: row.lock_at, updated_at: row.updated_at, updated_by_name: row.updated_by_name, title: row.title });
+  if (changed && !CL.editing) { await refetch(); safeRerender(); return; }
+  cloudBar();
+}
+async function tryLock(first) {
+  const { data } = await CL.sb.rpc('acquire_lock', { pid: CL.pid, nm: myName() });
+  if (!data || data.error) { CL.editing = false; cloudBar(); if (first) rerender(); return false; }
+  const mine = data.lock_user === CL.user.id, was = CL.editing;
+  Object.assign(CL.row, data);
+  if (mine && !was) { await refetch(); CL.editing = true; CL.lastAct = Date.now(); clearInterval(CL.beat); CL.beat = setInterval(heartbeat, 30e3); }
+  if (!mine) CL.editing = false;
+  if (first || mine !== was) rerender(); else cloudBar();
+  return mine;
+}
+async function heartbeat() {
+  if (!CL.editing) return clearInterval(CL.beat);
+  if (Date.now() - CL.lastAct > IDLE_MAX) { await cloudRelease(); toast('Dejaste de editar por inactividad: el guion quedó libre para tus socios.'); return; }
+  const { data } = await CL.sb.rpc('acquire_lock', { pid: CL.pid, nm: myName() });
+  if (data && data.lock_user !== CL.user.id) { CL.editing = false; clearInterval(CL.beat); Object.assign(CL.row, data); toast('Perdiste el turno de edición: ' + (data.lock_name || 'otra persona') + ' está editando.'); rerender(); }
+  else if (data) Object.assign(CL.row, data);
+}
+async function cloudRelease() {
+  if (!CL.pid) return;
+  if (CL.pushT) { clearTimeout(CL.pushT); CL.pushT = null; await cloudPush(); }
+  clearInterval(CL.beat);
+  if (CL.editing) { CL.editing = false; await CL.sb.rpc('release_lock', { pid: CL.pid }); if (CL.row) CL.row.lock_user = null; }
+  rerender();
+}
+function cloudAfterSave() {
+  if (!P?.cloud || !CL.editing || P.id !== CL.pid) return;
+  clearTimeout(CL.pushT); setSaved('Guardando en la nube…'); CL.pushT = setTimeout(cloudPush, 900);
+}
+async function cloudPush() {
+  CL.pushT = null; if (!P?.cloud || !CL.editing) return;
+  const at = new Date().toISOString();
+  const { data, error } = await CL.sb.from('projects').update({ data: P, title: P.title, updated_at: at, updated_by: CL.user.id, updated_by_name: myName() }).eq('id', P.id).select('id');
+  if (error) { setSaved('Sin conexión: se reintentará', true); CL.pushT = setTimeout(cloudPush, 8000); return; }
+  if (!data?.length) { CL.editing = false; clearInterval(CL.beat); toast('No se guardó en la nube: ya no tienes el turno de edición.'); await refetch(); rerender(); return; }
+  CL.row.updated_at = at; setSaved('Guardado en la nube');
+}
+async function cloudLeave() {
+  const pid = CL.pid; if (!pid) return;
+  if (CL.pushT) { clearTimeout(CL.pushT); await cloudPush(); }
+  clearInterval(CL.beat); clearInterval(CL.tick);
+  if (CL.editing) CL.sb.rpc('release_lock', { pid }).then(() => {}, () => {});
+  if (CL.chan) CL.sb.removeChannel(CL.chan);
+  Object.assign(CL, { pid: null, row: null, editing: false, chan: null, comments: [], draft: null, reply: null });
+  $('#cloudBar').hidden = true; cmtClose();
+}
+window.addEventListener('pagehide', () => {
+  if (!CL.editing || !CL.pid || !CL.token) return;
+  const h = { apikey: SB_KEY, Authorization: 'Bearer ' + CL.token, 'Content-Type': 'application/json' };
+  if (CL.pushT) { const body = JSON.stringify({ data: P, title: P.title, updated_at: new Date().toISOString(), updated_by: CL.user.id, updated_by_name: myName() });
+    if (body.length < 60000) fetch(`${SB_URL}/rest/v1/projects?id=eq.${encodeURIComponent(CL.pid)}`, { method: 'PATCH', keepalive: true, headers: h, body }); }
+  fetch(`${SB_URL}/rest/v1/rpc/release_lock`, { method: 'POST', keepalive: true, headers: h, body: JSON.stringify({ pid: CL.pid }) });
+});
+function cloudTick() { if (!CL.pid) return clearInterval(CL.tick); cloudBar(); }
+function rerender() {
+  if (!P) return;
+  const sc = ['.main', '.paper-scroll', '.side', '.mb-stage'].map(s => [s, $(s)?.scrollTop]);
+  if ($('#dialog').hidden === false) { cloudBar(); return; }
+  render();
+  sc.forEach(([s, v]) => { if (v != null && $(s)) $(s).scrollTop = v; });
+}
+// no recargar mientras alguien selecciona texto o escribe un comentario
+function safeRerender() {
+  const sel = getSelection(), busy = (sel.rangeCount && !sel.isCollapsed) || document.activeElement?.closest?.('#cmt,#dialog');
+  clearTimeout(CL.rrT);
+  if (busy) { CL.rrT = setTimeout(safeRerender, 1500); return; }
+  rerender();
+}
+function cloudBar() {
+  const b = $('#cloudBar'); if (!b) return; topButtons();
+  if (!P?.cloud || !CL.row) { b.hidden = true; return; }
+  const r = CL.row, other = lockFresh(r) && r.lock_user !== CL.user.id;
+  let h;
+  if (CL.editing) h = `<span class="dot ed"></span><span>Estás editando. Tus socios lo ven en modo lectura.</span><button class="btn sm" data-release>Dejar de editar</button>`;
+  else if (CL.role === 'viewer') h = `<span class="dot"></span><span>Solo lectura: puedes ver y comentar.</span>`;
+  else if (other) h = `<span class="dot ro"></span><span><b>${esc(r.lock_name || 'Alguien')}</b> está editando. Estás en modo lectura: ves sus cambios en vivo y puedes comentar.</span>`;
+  else h = `<span class="dot free"></span><span>Nadie está editando.</span><button class="btn sm pri" data-take>Editar</button>`;
+  b.innerHTML = h; b.hidden = false;
+  document.body.classList.toggle('ro', isRO());
+}
+$('#cloudBar').addEventListener('click', async e => {
+  if (e.target.closest('[data-release]')) { await cloudRelease(); toast('Listo: el guion quedó libre para tus socios'); }
+  if (e.target.closest('[data-take]')) { const ok = await tryLock(); if (!ok) toast('Otra persona tomó el turno antes'); }
+});
+let roToastAt = 0;
+function roWarn() {
+  if (Date.now() - CL.lastAct > 1500 || Date.now() - roToastAt < 4000) return;
+  roToastAt = Date.now();
+  toast(CL.role === 'viewer' ? 'Solo lectura: puedes comentar' : lockFresh(CL.row) ? `Modo lectura: ${CL.row.lock_name || 'otra persona'} está editando` : 'Pulsa «Editar» (abajo) para tomar el turno');
+}
+
+/* ---- compartir ---- */
+async function shareDialog() {
+  if (!P.cloud) return cloudUpload(P.id);
+  const d = $('#dialog'), owner = CL.role === 'owner';
+  const load = async () => (await CL.sb.from('project_members').select('*').eq('project_id', P.id).order('added_at')).data || [];
+  const draw = list => {
+    d.innerHTML = `<div class="dialog"><h3>Compartir «${esc(P.title)}»</h3>
+      <div class="mem"><span><b>${esc(CL.row.owner_email || '—')}</b></span><span class="muted">Dueño</span></div>
+      ${list.map(m => `<div class="mem"><span>${esc(m.email)}</span>${owner ? `<select class="inp" data-role="${esc(m.email)}" style="width:auto"><option value="editor" ${m.role === 'editor' ? 'selected' : ''}>Puede editar</option><option value="viewer" ${m.role === 'viewer' ? 'selected' : ''}>Solo ver y comentar</option></select><button class="iconbtn" data-rmm="${esc(m.email)}" title="Quitar">×</button>` : `<span class="muted">${m.role === 'editor' ? 'Puede editar' : 'Solo ver'}</span>`}</div>`).join('')}
+      ${owner ? `<label>Invitar por correo</label><div class="row" style="margin:0;flex-wrap:nowrap"><input class="inp" id="mEmail" type="email" placeholder="correo@ejemplo.com"><select class="inp" id="mRole" style="width:auto"><option value="editor">Puede editar</option><option value="viewer">Solo ver y comentar</option></select><button class="btn pri" data-addm>Invitar</button></div>
+      <p class="muted" style="font-size:12.5px;margin:8px 0 0">Tu socio entra en <b>virtualtut.github.io/glanx-guiones</b>, crea su cuenta <b>con ese mismo correo</b> y verá el guion en «En la nube».</p>` : '<p class="muted" style="font-size:12.5px">Solo el dueño puede invitar.</p>'}
+      <div class="row"><button class="btn pri" data-x>Listo</button></div></div>`;
+  };
+  draw(await load()); d.hidden = false;
+  d.onclick = async e => {
+    if (e.target === d || e.target.closest('[data-x]')) { d.hidden = true; return; }
+    if (e.target.closest('[data-addm]')) {
+      const email = $('#mEmail').value.trim().toLowerCase();
+      if (!/^\S+@\S+\.\S+$/.test(email)) return toast('Escribe un correo válido');
+      if (email === CL.user.email) return toast('Ese eres tú');
+      const { error } = await CL.sb.from('project_members').upsert({ project_id: P.id, email, role: $('#mRole').value });
+      if (error) return toast('No se pudo invitar: ' + error.message);
+      toast('Invitado: ' + email); draw(await load());
+    }
+    const rm = e.target.closest('[data-rmm]');
+    if (rm && confirm(`¿Quitar a ${rm.dataset.rmm}?`)) { await CL.sb.from('project_members').delete().eq('project_id', P.id).eq('email', rm.dataset.rmm); draw(await load()); }
+  };
+  d.onchange = async e => { const s = e.target.closest('[data-role]'); if (s) { await CL.sb.from('project_members').update({ role: s.value }).eq('project_id', P.id).eq('email', s.dataset.role); toast('Permiso cambiado'); } };
+}
+
+/* ---- comentarios ---- */
+const VIEW_LABEL = { guion: 'Guion', desglose: 'Desglose', planos: 'Planos', rodaje: 'Plan de rodaje', presupuesto: 'Presupuesto', moodboard: 'Moodboard' };
+async function loadComments() {
+  if (!CL.pid) return;
+  const { data } = await CL.sb.from('comments').select('*').eq('project_id', CL.pid).order('created_at');
+  CL.comments = data || []; topButtons(); markCommented(); if (CL.open) cmtRender();
+}
+function sceneOfBlock(bid) { let sid = null; for (const b of P.blocks) { if (b.t === 'scene') sid = b.id; if (b.id === bid) return sid; } return null; }
+function cmtWhere(c) {
+  const sc = c.sid && getScenes().find(s => s.id === c.sid);
+  return (VIEW_LABEL[c.view] || 'General') + (sc ? ` · Escena ${sc.num}` : '');
+}
+function markCommented() {
+  const open = new Set(CL.comments.filter(c => !c.parent_id && !c.resolved && c.block).map(c => c.block));
+  $$('#ed > .el').forEach(el => el.classList.toggle('has-cmt', open.has(el.dataset.id)));
+}
+function cmtOpen(draft) {
+  if (!P?.cloud) return toast('Sube el guion a la nube para comentar');
+  CL.open = true; if (draft) CL.draft = draft;
+  CL.draft ||= { view: UI.view, sid: ['desglose', 'planos', 'moodboard', 'guion'].includes(UI.view) ? (UI.sid === 'general' ? null : UI.sid) : null };
+  $('#cmt').hidden = false; document.body.classList.add('cmt-open'); cmtRender();
+  setTimeout(() => $('#cmtTxt')?.focus(), 30);
+}
+function cmtClose() { CL.open = false; const c = $('#cmt'); if (c) c.hidden = true; document.body.classList.remove('cmt-open'); }
+const ago = t => { const s = (Date.now() - new Date(t)) / 1000; return s < 60 ? 'ahora' : s < 3600 ? `hace ${Math.floor(s / 60)} min` : s < 86400 ? `hace ${Math.floor(s / 3600)} h` : fmtDate(t); };
+function cmtRender() {
+  const box = $('#cmt'); if (!box || !CL.open || !CL.user) return;
+  const all = CL.comments, roots = all.filter(c => !c.parent_id).reverse();
+  const shown = roots.filter(c => CL.showRes || !c.resolved), nres = roots.filter(c => c.resolved).length;
+  const canMod = c => c.author === CL.user.id || CL.role === 'owner';
+  const one = c => `<div class="cm-body">${esc(c.body).replace(/\n/g, '<br>')}</div><div class="cm-meta"><b>${esc(c.author_name || '—')}</b> · ${ago(c.created_at)}${canMod(c) ? ` · <a data-cdelc="${c.id}">borrar</a>` : ''}</div>`;
+  const d = CL.draft;
+  box.innerHTML = `<div class="cm-h"><b>Comentarios</b><span class="spacer"></span>${nres ? `<label class="muted"><input type="checkbox" data-showres ${CL.showRes ? 'checked' : ''}> Resueltos (${nres})</label>` : ''}<button class="iconbtn" data-cclose title="Cerrar">×</button></div>
+    <div class="cm-new">${d ? `<div class="cm-where">En: ${esc(cmtWhere(d))}${d.quote ? `<q>${esc(d.quote)}</q>` : ''}<button class="iconbtn" data-cnodraft title="Quitar">×</button></div>` : ''}
+      <textarea class="inp" id="cmtTxt" rows="3" placeholder="Escribe un comentario…  (Ctrl+Enter para enviar)"></textarea>
+      <div class="row" style="margin-top:6px"><span class="muted" style="font-size:11.5px">Selecciona texto del guion para comentar esa parte.</span><span class="spacer"></span><button class="btn pri sm" data-csend>Comentar</button></div></div>
+    <div class="cm-list">${shown.map(c => `<div class="cm ${c.resolved ? 'res' : ''}" data-cid="${c.id}">
+        <div class="cm-where link" data-cgo="${c.id}">${esc(cmtWhere(c))}${c.quote ? `<q>${esc(c.quote)}</q>` : ''}</div>${one(c)}
+        ${all.filter(r => r.parent_id === c.id).map(r => `<div class="cm-reply">${one(r)}</div>`).join('')}
+        ${CL.reply === c.id ? `<div class="cm-reply"><textarea class="inp" id="cmtRep" rows="2" placeholder="Responder…"></textarea><div class="row" style="margin-top:4px;justify-content:flex-end"><button class="btn sm" data-crcancel>Cancelar</button><button class="btn sm pri" data-crsend="${c.id}">Responder</button></div></div>` : ''}
+        <div class="cm-acts"><a data-crep="${c.id}">Responder</a><a data-cres="${c.id}">${c.resolved ? 'Reabrir' : '✓ Resuelto'}</a></div></div>`).join('')
+      || '<p class="muted" style="padding:10px">Aún no hay comentarios.</p>'}</div>`;
+  if (CL.reply) $('#cmtRep')?.focus();
+}
+async function cmtSend(body, parent) {
+  body = body.trim(); if (!body) return;
+  const base = parent ? { parent_id: parent.id, view: parent.view, sid: parent.sid, block: parent.block } : { ...(CL.draft || { view: UI.view }) };
+  const { error } = await CL.sb.from('comments').insert({ ...base, project_id: P.id, body, author: CL.user.id, author_name: myName() });
+  if (error) return toast('No se pudo comentar: ' + error.message);
+  if (!parent) CL.draft = null; CL.reply = null; await loadComments();
+}
+function cmtGo(c) {
+  const show = () => {
+    if (c.block) { const el = $(`#ed [data-id="${c.block}"]`); if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1600); } }
+  };
+  if (c.sid && getScenes().some(s => s.id === c.sid)) UI.sid = c.sid;
+  if (c.view && c.view !== UI.view) { go(c.view); setTimeout(show, 120); } else { if (c.view !== 'guion') rerender(); show(); }
+}
+$('#cmt').addEventListener('click', async e => {
+  const t = e.target, id = x => CL.comments.find(c => c.id === x);
+  if (t.closest('[data-cclose]')) return cmtClose();
+  if (t.closest('[data-cnodraft]')) { CL.draft = { view: UI.view }; return cmtRender(); }
+  if (t.closest('[data-csend]')) return cmtSend($('#cmtTxt').value);
+  if (t.closest('[data-crep]')) { CL.reply = t.closest('[data-crep]').dataset.crep; return cmtRender(); }
+  if (t.closest('[data-crcancel]')) { CL.reply = null; return cmtRender(); }
+  if (t.closest('[data-crsend]')) return cmtSend($('#cmtRep').value, id(t.closest('[data-crsend]').dataset.crsend));
+  if (t.closest('[data-cres]')) { const c = id(t.closest('[data-cres]').dataset.cres); const { error } = await CL.sb.from('comments').update({ resolved: !c.resolved }).eq('id', c.id); if (error) toast(error.message); return loadComments(); }
+  if (t.closest('[data-cdelc]')) { if (!confirm('¿Borrar este comentario?')) return; await CL.sb.from('comments').delete().eq('id', t.closest('[data-cdelc]').dataset.cdelc); return loadComments(); }
+  if (t.closest('[data-cgo]')) return cmtGo(id(t.closest('[data-cgo]').dataset.cgo));
+});
+$('#cmt').addEventListener('change', e => { if (e.target.matches('[data-showres]')) { CL.showRes = e.target.checked; cmtRender(); } });
+$('#cmt').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (e.target.id === 'cmtTxt') cmtSend(e.target.value); if (e.target.id === 'cmtRep') cmtSend(e.target.value, CL.comments.find(c => c.id === CL.reply)); }
+  e.stopPropagation();
+});
+// botón flotante «Comentar» al seleccionar texto del guion
+document.addEventListener('mouseup', () => setTimeout(() => {
+  const pop = $('#cmtpop'); if (!pop) return;
+  const sel = getSelection(), ed = $('#ed');
+  const ok = P?.cloud && ed && sel.rangeCount && !sel.isCollapsed && ed.contains(sel.anchorNode) && sel.toString().trim();
+  if (!ok) { pop.hidden = true; return; }
+  const r = sel.getRangeAt(0).getBoundingClientRect();
+  pop.hidden = false; pop.style.left = Math.min(innerWidth - 130, r.right + 6) + 'px'; pop.style.top = Math.max(60, r.top - 36) + 'px';
+}, 0));
+$('#cmtpop').addEventListener('mousedown', e => {
+  e.preventDefault();
+  const sel = getSelection(); const el = (sel.anchorNode?.nodeType === 1 ? sel.anchorNode : sel.anchorNode?.parentElement)?.closest('.el');
+  const quote = sel.toString().trim().replace(/\s+/g, ' ').slice(0, 200);
+  $('#cmtpop').hidden = true;
+  cmtOpen({ view: 'guion', sid: el ? sceneOfBlock(el.dataset.id) : null, block: el?.dataset.id || null, quote });
+});
+$('#cmtBtn').addEventListener('click', () => CL.open ? cmtClose() : cmtOpen());
+$('#shareBtn').addEventListener('click', () => shareDialog());
+$('#userBtn').addEventListener('click', async () => { await cloudInit(); CL.user ? accountDialog() : loginDialog(); });
+app.addEventListener('click', async e => {
+  if (P) return;
+  const t = e.target;
+  if (t.closest('[data-login]')) { e.stopPropagation(); return loginDialog(); }
+  const up = t.closest('[data-up]'); if (up) { e.stopPropagation(); return cloudUpload(up.dataset.up); }
+  const del = t.closest('[data-cdel]');
+  if (del) {
+    e.stopPropagation();
+    if (!confirm('¿Borrar este guion de la nube? Tus socios dejarán de verlo. La copia de este navegador se queda.')) return;
+    const { error } = await CL.sb.from('projects').delete().eq('id', del.dataset.cdel);
+    if (error) return toast(error.message);
+    const lp = loadProject(del.dataset.cdel); if (lp) { delete lp.cloud; writeProject(lp); }
+    return renderHome();
+  }
+  const co = t.closest('[data-copen]'); if (co) { e.stopPropagation(); location.hash = `#/p/${co.dataset.copen}/guion`; }
+}, true);
+cloudInit();
 
 /* ================= Ejemplo ================= */
 function sampleProject() {
