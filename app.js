@@ -1162,7 +1162,7 @@ function onEdPaste(e) {
   const endLen = last.textContent.length; setText(last, last.textContent + after); setCaret(last, endLen);
   scheduleSync(true); toast(`Pegado: ${blocks.length} elementos`);
 }
-function scheduleSync(fast) { clearTimeout(syncTimer); setSaved('Guardando…'); syncTimer = setTimeout(syncNow, fast ? 60 : 350); }
+function scheduleSync(fast) { if (CL.comments.length) requestAnimationFrame(placeMarks); clearTimeout(syncTimer); setSaved('Guardando…'); syncTimer = setTimeout(syncNow, fast ? 60 : 350); }
 function syncNow() {
   clearTimeout(syncTimer); syncTimer = null;
   const ed = $('#ed'); if (!ed || !P) return;
@@ -2589,15 +2589,37 @@ function cmtWhere(c) {
 function markCommented() {
   const open = new Set(CL.comments.filter(c => !c.parent_id && !c.resolved && c.block).map(c => c.block));
   $$('#ed > .el').forEach(el => el.classList.toggle('has-cmt', open.has(el.dataset.id)));
+  placeMarks();
 }
+// flechas en el margen del guion: señalan la línea comentada; clic = abre esos comentarios
+function placeMarks() {
+  const paper = $('.paper'), ed = $('#ed'); if (!paper || !ed) return;
+  let lay = $('#cmarks', paper); if (!lay) { lay = document.createElement('div'); lay.id = 'cmarks'; paper.appendChild(lay); }
+  if (!P?.cloud) { lay.innerHTML = ''; return; }
+  const by = new Map();
+  CL.comments.filter(c => !c.parent_id && !c.resolved && c.block).forEach(c => { if (!by.has(c.block)) by.set(c.block, []); by.get(c.block).push(c); });
+  const pr = paper.getBoundingClientRect(); let lastTop = -99;
+  lay.innerHTML = [...by].map(([bid, list]) => {
+    const el = ed.querySelector(`[data-id="${bid}"]`); if (!el) return '';
+    let top = el.getBoundingClientRect().top - pr.top - 2; if (top < lastTop + 30) top = lastTop + 30; lastTop = top;
+    const who = [...new Set(list.map(c => c.author_name || '—'))].join(', ');
+    return `<button class="cmark ${CL.focus === bid ? 'on' : ''}" data-cmark="${bid}" style="top:${top}px" title="${esc(who)}: ${esc(list[0].body.slice(0, 80))}"><span class="arr"></span><svg viewBox="0 0 16 16" width="13" height="13"><path d="M2 3h12v8H7l-3 3v-3H2z" fill="currentColor"/></svg>${list.length}</button>`;
+  }).join('');
+}
+document.addEventListener('click', e => {
+  const m = e.target.closest('[data-cmark]'); if (!m) return;
+  CL.focus = m.dataset.cmark; cmtOpen(); placeMarks();
+  setTimeout(() => $('.cm.focus')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 60);
+});
+window.addEventListener('resize', () => placeMarks());
 function cmtOpen(draft) {
   if (!P?.cloud) return toast('Sube el guion a la nube para comentar');
   CL.open = true; if (draft) CL.draft = draft;
   CL.draft ||= { view: UI.view, sid: ['desglose', 'planos', 'moodboard', 'guion'].includes(UI.view) ? (UI.sid === 'general' ? null : UI.sid) : null };
-  $('#cmt').hidden = false; document.body.classList.add('cmt-open'); cmtRender();
+  $('#cmt').hidden = false; document.body.classList.add('cmt-open'); cmtRender(); setTimeout(placeMarks, 0);
   setTimeout(() => $('#cmtTxt')?.focus(), 30);
 }
-function cmtClose() { CL.open = false; const c = $('#cmt'); if (c) c.hidden = true; document.body.classList.remove('cmt-open'); }
+function cmtClose() { CL.open = false; CL.focus = null; setTimeout(placeMarks, 0); const c = $('#cmt'); if (c) c.hidden = true; document.body.classList.remove('cmt-open'); }
 const ago = t => { const s = (Date.now() - new Date(t)) / 1000; return s < 60 ? 'ahora' : s < 3600 ? `hace ${Math.floor(s / 60)} min` : s < 86400 ? `hace ${Math.floor(s / 3600)} h` : fmtDate(t); };
 function cmtRender() {
   const box = $('#cmt'); if (!box || !CL.open || !CL.user) return;
@@ -2610,7 +2632,7 @@ function cmtRender() {
     <div class="cm-new">${d ? `<div class="cm-where">En: ${esc(cmtWhere(d))}${d.quote ? `<q>${esc(d.quote)}</q>` : ''}<button class="iconbtn" data-cnodraft title="Quitar">×</button></div>` : ''}
       <textarea class="inp" id="cmtTxt" rows="3" placeholder="Escribe un comentario…  (Ctrl+Enter para enviar)"></textarea>
       <div class="row" style="margin-top:6px"><span class="muted" style="font-size:11.5px">Selecciona texto del guion para comentar esa parte.</span><span class="spacer"></span><button class="btn pri sm" data-csend>Comentar</button></div></div>
-    <div class="cm-list">${shown.map(c => `<div class="cm ${c.resolved ? 'res' : ''}" data-cid="${c.id}">
+    <div class="cm-list">${shown.map(c => `<div class="cm ${c.resolved ? 'res' : ''} ${CL.focus && c.block === CL.focus ? 'focus' : ''}" data-cid="${c.id}">
         <div class="cm-where link" data-cgo="${c.id}">${esc(cmtWhere(c))}${c.quote ? `<q>${esc(c.quote)}</q>` : ''}</div>${one(c)}
         ${all.filter(r => r.parent_id === c.id).map(r => `<div class="cm-reply">${one(r)}</div>`).join('')}
         ${CL.reply === c.id ? `<div class="cm-reply"><textarea class="inp" id="cmtRep" rows="2" placeholder="Responder…"></textarea><div class="row" style="margin-top:4px;justify-content:flex-end"><button class="btn sm" data-crcancel>Cancelar</button><button class="btn sm pri" data-crsend="${c.id}">Responder</button></div></div>` : ''}
