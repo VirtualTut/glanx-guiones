@@ -2620,6 +2620,7 @@ function cmtOpen(draft) {
   CL.open = true; if (draft) CL.draft = draft;
   CL.draft ||= { view: UI.view, sid: ['desglose', 'planos', 'moodboard', 'guion'].includes(UI.view) ? (UI.sid === 'general' ? null : UI.sid) : null };
   $('#cmt').hidden = false; document.body.classList.add('cmt-open'); cmtRender(); setTimeout(placeMarks, 0);
+  loadPeople().catch(() => {});
   setTimeout(() => $('#cmtTxt')?.focus(), 30);
 }
 function cmtClose() { CL.open = false; CL.focus = null; CL.focusC = null; setTimeout(placeMarks, 0); const c = $('#cmt'); if (c) c.hidden = true; document.body.classList.remove('cmt-open'); }
@@ -2736,7 +2737,12 @@ function bodyHTML(body) {
 const MP = { ta: null, items: [], i: 0, at: 0 };
 function mentUpdate(ta) {
   const pop = $('#mentpop'); const pre = ta.value.slice(0, ta.selectionStart); const m = /(^|\s)@([^\s@]{0,30})$/.exec(pre);
-  if (!m || !CL.people?.length) { pop.hidden = true; MP.items = []; return; }
+  if (!m) { pop.hidden = true; MP.items = []; return; }
+  const others = (CL.people || []).filter(p => p.email !== CL.user.email.toLowerCase());
+  if (!others.length) {
+    MP.items = []; pop.innerHTML = `<div class="ac-h" style="padding:8px 10px;font-size:12px;max-width:300px;white-space:normal">Aún no hay nadie más en este guion. Usa <b>Compartir</b> (arriba) para invitar a tus socios y podrás mencionarlos.</div>`;
+    const r = ta.getBoundingClientRect(); pop.hidden = false; pop.style.left = r.left + 'px'; pop.style.top = (r.bottom + 4) + 'px'; pop.style.width = r.width + 'px'; return;
+  }
   const q = fold(m[2]);
   MP.items = CL.people.filter(p => p.email !== CL.user.email.toLowerCase() && (fold(p.name).includes(q) || fold(p.email).includes(q))).slice(0, 6);
   if (!MP.items.length) { pop.hidden = true; return; }
