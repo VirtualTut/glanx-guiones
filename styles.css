@@ -505,3 +505,6 @@ body.ro #ed{caret-color:transparent}
 .ment-it span{font-size:12px} .ment-it .ment-body{font-size:13.5px}
 .ment-it q{font:italic 12px var(--mono);color:var(--muted);quotes:'«' '»'}
 @media print{.bell-btn{display:none!important}}
+
+.newver{position:fixed;top:64px;left:50%;transform:translateX(-50%);z-index:95;background:var(--acc);color:var(--accink);font-weight:700;padding:8px 10px 8px 16px;border-radius:99px;display:flex;gap:10px;align-items:center;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.newver .btn{background:var(--accink);color:var(--acc);border-color:var(--accink)}

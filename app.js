@@ -2,6 +2,7 @@
    Todo se guarda en este navegador (localStorage + IndexedDB para imágenes).
    Sin servidor, sin dependencias. */
 'use strict';
+const APP_V = '202611072020';
 
 /* ================= Utilidades ================= */
 const $ = (s, r = document) => r.querySelector(s);
@@ -149,8 +150,12 @@ function parseHeading(h) {
   const m = h.match(/^(INT\.?\s*\/\s*EXT\.?|EXT\.?\s*\/\s*INT\.?|I\/E\.?|INTERIOR|EXTERIOR|INT\.?|EXT\.?)\s*(.*)$/i);
   let ie = '', rest = h;
   if (m) { ie = m[1].includes('/') ? 'INT/EXT' : m[1].toUpperCase().startsWith('INT') ? 'INT' : 'EXT'; rest = m[2]; }
-  const parts = rest.split(/\s+[-–—]\s+/);
-  const loc = parts.shift().replace(/^[.\s]+/, '').trim() || '—';
+  let parts = rest.replace(/^[\s.]*[-–—]\s*/, '').split(/\s+[-–—]\s*|\s*[–—]\s+/);
+  if (!m) { // «INSERTO – INTERIOR – COCINA – NOCHE»
+    const k = parts.findIndex(x => /^(INT\.?\s*\/\s*EXT|EXT\.?\s*\/\s*INT|I\/E|INTERIOR|EXTERIOR|INT|EXT)\.?$/i.test(x.trim()));
+    if (k >= 0) { const t = parts[k].toUpperCase(); ie = t.includes('/') ? 'INT/EXT' : t.startsWith('INT') ? 'INT' : 'EXT'; parts = parts.slice(k + 1); }
+  }
+  const loc = parts.shift()?.replace(/^[.\s]+/, '').trim() || '—';
   const time = parts.join(' - ').trim();
   const night = /NOCHE|NIGHT|MADRUGADA|ANOCHECER/i.test(time);
   return { ie, loc, time, night };
@@ -177,7 +182,8 @@ const isCaps = s => /[A-ZÁÉÍÓÚÑÜ]/.test(s) && s === s.toUpperCase();
 const SCENE_RE = /^(INT|EXT|EST|INT\.?\/EXT|EXT\.?\/INT|I\/E|INTERIOR|EXTERIOR)[.\s\/]/i;
 // número de escena delante o detrás: «1. INT CASA – DÍA», «12A INT. …», «INT. CASA - NOCHE 12»
 const stripSceneNum = s => s.replace(/^\d+[A-Z]?[.)\-]?\s+/, '').replace(/\s+\d+[A-Z]?\.?$/, '');
-const isSceneLine = s => SCENE_RE.test(stripSceneNum(s));
+const IE_TOKEN = /(^|[\s–—-])(INT|EXT|INTERIOR|EXTERIOR)\.?([\s–—-]|$)/;
+const isSceneLine = s => SCENE_RE.test(stripSceneNum(s)) || (/^\d+[A-Z]?[.)]\s/.test(s) && s.length < 90 && isCaps(s) && IE_TOKEN.test(s));
 // transiciones en español e inglés: «CORTE A:», «Corte a negro.», «FUNDIDO A NEGRO», «CUT TO:»
 const TRANS_RE = /^(CORTE|CORTA|FUNDIDO|FUNDE|DISOLVENCIA|DISUELVE|ENCADENADO|FADE|CUT|SMASH CUT|MATCH CUT|DISSOLVE)\b.{0,25}$/i;
 const isTransition = s => s.length <= 35 && (TRANS_RE.test(s) || (isCaps(s) && /(TO:|A:)$/.test(s)));
@@ -278,6 +284,8 @@ function pdfParas(lines) {
   const textEnd = l => { const its = l.items.filter(it => cleanTxt(it.s)).sort((a, b) => a.x - b.x); while (its.length > 1 && NUM_RE.test(its[its.length - 1].s)) its.pop(); const z = its[its.length - 1]; return z ? z.x + z.w : 0; };
   const ends = pre.filter(l => cleanTxt(l.text).length > 25).map(textEnd).sort((a, b) => a - b);
   const right = ends[Math.floor(ends.length * .95)] || Math.max(...pre.map(l => l.xEnd));
+  const gaps = []; pre.forEach((l, i) => { const q = pre[i - 1]; if (q && q.page === l.page && q.y - l.y > 0) gaps.push(Math.round((q.y - l.y) * 2) / 2); });
+  const lineGap = modeOf(gaps) || 14;
   const out = []; let prev = null;
   for (const l of pre) {
     // números de escena en los márgenes y números de página
@@ -293,12 +301,15 @@ function pdfParas(lines) {
     if (!text || NUM_RE.test(text) || CONT_RE.test(text)) continue;
     const gap = prev && prev.page === l.page ? prev.y - l.y : Infinity;
     const blank = gap > l.size * 1.55;
+    // para guiones de cine: «línea en blanco» relativa al interlineado del documento (1.5, doble…)
+    const blankR = gap > Math.max(l.size * 1.55, lineGap * 1.4);
     const wrap = !blank && prev && prev.xEnd > right - 50 && !/[​]\s*$/.test(prev.raw);
     const long = j.xEnd > margin + .85 * (right - margin);
     // ¿es continuación de la línea anterior? Sí, si su primera palabra no cabía al final de esa línea
     const firstWord = (text.match(/^\S+/) || [''])[0];
-    const cont = !blank && !!prev && prev.xEnd + (firstWord.length + 1) * l.size * .55 > right - 2 && !/[​]\s*$/.test(prev.raw);
-    const p = { text, raw: j.text, ind: (j.x - margin) / 72, size: l.size, bold: l.bold, blank, wrap: wrap || cont, cont, gap, long, page: l.page, y: l.y, xEnd: j.xEnd };
+    const fits = !!prev && prev.xEnd + (firstWord.length + 1) * l.size * .55 > right - 2 && !/[​]\s*$/.test(prev.raw);
+    const cont = !blank && fits, contR = !blankR && fits;
+    const p = { text, raw: j.text, ind: (j.x - margin) / 72, size: l.size, bold: l.bold, blank, blankR, wrap: wrap || cont, cont, contR, gap, long, page: l.page, y: l.y, xEnd: j.xEnd };
     out.push(p); prev = p;
   }
   return out;
@@ -391,7 +402,8 @@ function screenplayFromParas(paras) {
     const pre = paras.slice(0, fi), fs = paras[fi];
     const ownPage = fs.page > 1 && pre.every(p => p.page < fs.page);
     if (ownPage || (pre.length <= 8 && !pre.some(isCharLine))) {
-      title = cleanTxt(pre.filter(p => !/^(guion|guión|escrito por|written by|de|by|por)$/i.test(p.text) && !/@|\bwww\.|\d{6,}/.test(p.text)).slice(0, 1).map(p => p.text).join(' '));
+      title = cleanTxt(pre.filter(p => !/^(guion|guión|escrito por|written by|de|by|por)$/i.test(p.text) && !/@|\bwww\.|\d{6,}/.test(p.text)
+        && !/^\d+(\.\d+)*\.?\s/.test(p.text) && !/^gui[oó]n\s+(literario|t[eé]cnico)$/i.test(p.text)).slice(0, 1).map(p => p.text).join(' '));
       paras = paras.slice(fi);
     }
   }
@@ -401,14 +413,19 @@ function screenplayFromParas(paras) {
     const lastP = prevP; prevP = p;
     if (p.stype) { t = p.stype === 'action' && isTransition(s) ? 'transition' : p.stype; if (t === 'scene') s = stripSceneNum(s); }
     else if (p.ind < IND.dia && isSceneLine(s)) { t = 'scene'; s = stripSceneNum(s); }
-    else if (p.ind >= IND.trans || (p.ind >= 2.5 && /:$/.test(s) && isCaps(s)) || isTransition(s)) t = 'transition';
+    else if (isTransition(s) || (p.ind >= 2.5 && /:$/.test(s) && isCaps(s)) || (p.ind >= IND.trans + .6 && isCaps(s) && s.length < 30 && !isCharLine(p))) t = 'transition';
     else if (p.ind >= IND.char) t = /^\(/.test(s) ? 'paren' : isCaps(s) && s.length < 45 ? 'character' : 'dialogue';
     else if (p.ind >= IND.dia) t = /^\(/.test(s) ? 'paren' : 'dialogue';
     else t = 'action';
     const prev = out[out.length - 1];
     if (prev && prev.t === 'paren' && !/\)\s*$/.test(prev.x) && t !== 'scene' && t !== 'character') { prev.x += ' ' + s; continue; }
+    // «ELENA (CAMBIA DE PRONTO DE ACTITUD Y SE» + «ANIMA)»
+    if (prev && prev.t === 'character' && (prev.x.match(/\(/g) || []).length > (prev.x.match(/\)/g) || []).length) { prev.x += ' ' + s; continue; }
+    // «3. CONTINUACIÓN … – CONSULTORIO –» + «DÍA»
+    if (prev && prev.t === 'scene' && (/[-–—]\s*$/.test(prev.x) || /^\([^)]*\)$/.test(s)) && isCaps(s) && s.length < 30 && (!(p.blankR ?? p.blank) || /^\(/.test(s))) { prev.x += ' ' + s; continue; }
     // líneas cortadas: el diálogo siempre se une; la acción solo si la línea anterior llegaba al margen derecho
-    if (prev && !p.blank && prev.t === t && (t === 'dialogue' || (t === 'action' && (p.cont ?? true)))) { prev.x += ' ' + s; continue; }
+    const pBlank = p.blankR ?? p.blank, pCont = p.contR ?? p.cont ?? true;
+    if (prev && !pBlank && prev.t === t && (t === 'dialogue' || (t === 'action' && pCont))) { prev.x += ' ' + s; continue; }
     out.push({ t, x: s });
   }
   return { blocks: out, title };
@@ -499,10 +516,47 @@ function docFromParas(paras, title) {
   return { sets: [{ title, blocks: classify(0, paras.length) }] };
 }
 /* Texto plano con sangrías (guion exportado a .txt desde Final Draft, etc.) */
+// páginas con diálogos (nombre en mayúsculas sangrado + texto debajo): ahí está el guion
+function guessScriptPages(paras) {
+  const cues = new Map();
+  paras.forEach((p, i) => { if (p.ind >= IND.char - .3 && isCaps(p.text) && p.text.length < 40 && !isTransition(p.text) && paras[i + 1] && !isCaps(paras[i + 1].text)) cues.set(p.page, (cues.get(p.page) || 0) + 1); });
+  const pg = [...cues].filter(([, n]) => n >= 2).map(([k]) => k).sort((a, b) => a - b);
+  if (!pg.length) return null;
+  let best = [pg[0], pg[0]], cur = [pg[0], pg[0]];
+  for (const k of pg.slice(1)) { if (k - cur[1] <= 2) cur[1] = k; else cur = [k, k]; if (cur[1] - cur[0] > best[1] - best[0]) best = [...cur]; }
+  // si la primera página con diálogos no abre con una escena, el guion empezó en la anterior
+  const onFirst = paras.filter(p => p.page === best[0]);
+  const sceneIdx = onFirst.findIndex(p => isSceneLine(p.text)), cueIdx = onFirst.findIndex(p => p.ind >= IND.char - .3 && isCaps(p.text));
+  if (sceneIdx < 0 || (cueIdx >= 0 && cueIdx < sceneIdx)) { const back = paras.filter(p => p.page === best[0] - 1 && isSceneLine(p.text)).pop(); if (back) best[0] = back.page; }
+  // y sigue mientras haya diálogos o escenas en las páginas siguientes
+  const has = k => (cues.get(k) || 0) > 0 || paras.some(p => p.page === k && isSceneLine(p.text));
+  while (has(best[1] + 1)) best[1]++;
+  return best;
+}
+function askPages(total, guess) {
+  return new Promise(res => {
+    const d = $('#dialog');
+    d.innerHTML = `<div class="dialog"><h3>¿Qué páginas importar?</h3>
+      <p class="muted" style="margin:0 0 8px">Este PDF tiene <b>${total} páginas</b>. Si es una tesis, libro o dossier, importa solo las del guion para que no se mezcle con el resto.</p>
+      ${guess ? `<p style="margin:0 0 8px">Parece que el guion está en las páginas <b>${guess[0]}–${guess[1]}</b>.</p>` : ''}
+      <div class="row" style="margin:0;justify-content:flex-start"><label style="margin:0">Desde</label><input class="inp" id="pgA" type="number" min="1" max="${total}" value="${guess ? guess[0] : 1}" style="width:90px">
+        <label style="margin:0">hasta</label><input class="inp" id="pgB" type="number" min="1" max="${total}" value="${guess ? guess[1] : total}" style="width:90px"></div>
+      <div class="row"><button class="btn" data-x>Cancelar</button><button class="btn" data-all>Todo el PDF</button><button class="btn pri" data-ok>Importar esas páginas</button></div></div>`;
+    d.hidden = false;
+    const done = v => { d.hidden = true; d.onclick = null; res(v); };
+    d.onclick = e => {
+      if (e.target === d || e.target.closest('[data-x]')) return done(null);
+      if (e.target.closest('[data-all]')) return done([1, total]);
+      if (e.target.closest('[data-ok]')) { let a = Math.max(1, +$('#pgA').value || 1), b = Math.min(total, +$('#pgB').value || total); if (a > b) [a, b] = [b, a]; done([a, b]); }
+    };
+  });
+}
 function txtParas(text) {
   const out = []; let blank = true;
-  for (const raw of text.replace(/\r/g, '').split('\n')) {
+  for (let raw of text.replace(/\r/g, '').split('\n')) {
+    raw = raw.replace(/[\f\v\u200b\ufeff]/g, '');
     if (!raw.trim()) { blank = true; continue; }
+    if (/^\s{12,}\d{1,3}\.?\s*$/.test(raw)) continue; // número de página a la derecha
     const lead = raw.match(/^[\t ]*/)[0];
     out.push({ text: cleanTxt(raw), ind: (lead.match(/\t/g) || []).length * .5 + (lead.match(/ /g) || []).length * .1, blank, size: 12, bold: false });
     blank = false;
@@ -700,6 +754,13 @@ async function importFile(f) {
         const lines = await pdfLines(buf, (n, t) => { if (t > 3) toast(`Leyendo PDF: página ${n} de ${t}…`); });
         if (!lines.length) throw new Error('Este PDF no tiene texto (parece escaneado o una imagen). Hace falta un PDF exportado desde Word, Google Docs o Final Draft.');
         paras = pdfParas(lines);
+        const pages = Math.max(...paras.map(x => x.page || 1));
+        const guess = pages > 20 ? guessScriptPages(paras) : null;
+        if (guess && guess[1] - guess[0] + 1 < pages * .8) {
+          const rng = await askPages(pages, guess);
+          if (!rng) { toast('Importación cancelada'); return; }
+          paras = paras.filter(x => x.page >= rng[0] && x.page <= rng[1]);
+        }
       } else paras = await docxParas(buf);
       if (!paras.length) throw new Error('No se encontró texto en el archivo.');
       let sets;
@@ -2724,7 +2785,7 @@ async function loadPeople() {
   const prof = emails.length ? (await CL.sb.from('profiles').select('email,name').in('email', emails)).data || [] : [];
   CL.people = emails.map(e => ({ email: e, name: (prof.find(p => (p.email || '').toLowerCase() === e)?.name || e.split('@')[0]).trim() }));
 }
-const mentionsIn = body => (CL.people || []).filter(p => p.email !== CL.user.email.toLowerCase() && body.includes('@' + p.name)).map(p => p.email);
+const mentionsIn = body => (CL.people || []).filter(p => p.email !== CL.user.email.toLowerCase() && (body.includes('@' + p.name) || fold(body).includes('@' + fold(p.email.split('@')[0])))).map(p => p.email);
 function bodyHTML(body) {
   let h = esc(body);
   [...(CL.people || [])].sort((a, b) => b.name.length - a.name.length).forEach(p => {
@@ -2819,6 +2880,22 @@ function mentionsLive() {
 }
 $('#bellBtn').addEventListener('click', () => bellDialog());
 
+/* ---- aviso de versión nueva: compara con la que hay publicada ---- */
+async function checkVersion() {
+  try {
+    const h = await (await fetch('index.html?_=' + Date.now(), { cache: 'no-store' })).text();
+    const v = /app\.js\?v=(\w+)/.exec(h)?.[1];
+    if (v && v !== APP_V && !$('#newver')) {
+      const b = document.createElement('div'); b.id = 'newver'; b.className = 'newver';
+      b.innerHTML = 'Hay una versión nueva de la app. <button class="btn sm pri">Actualizar</button>';
+      b.querySelector('button').onclick = () => { syncNow(); flushSave(); location.reload(); };
+      document.body.appendChild(b);
+    }
+  } catch {}
+}
+setInterval(checkVersion, 5 * 60e3);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkVersion(); });
+setTimeout(checkVersion, 8000);
 cloudInit();
 
 /* ================= Ejemplo ================= */
