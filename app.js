@@ -2,7 +2,7 @@
    Todo se guarda en este navegador (localStorage + IndexedDB para imágenes).
    Sin servidor, sin dependencias. */
 'use strict';
-const APP_V = '202611091628';
+const APP_V = '202611091700';
 
 /* ================= Utilidades ================= */
 const $ = (s, r = document) => r.querySelector(s);
@@ -2029,13 +2029,14 @@ function renderMoodboard() {
         <button class="btn sm" data-mb="note">+ Nota</button><button class="btn sm" data-mb="slot">+ Hueco</button><button class="btn sm" data-mb="link">+ Enlace</button>
         <select class="inp mb-inl" data-mbsel="tpl" title="Empezar desde una plantilla"><option value="">Plantilla…</option>${Object.entries(MB_TPLS).map(([k, t]) => `<option value="${k}">${t.label}</option>`).join('')}</select>
         <select class="inp mb-inl" data-mbsel="bg" title="Fondo">${Object.entries(MB_BGS).map(([k, b]) => `<option value="${k}" ${cv.bg === k ? 'selected' : ''}>Fondo: ${b.label}</option>`).join('')}</select>
+        <button class="btn sm" data-mb="paste" id="mbPasteBtn" title="Pegar lo copiado (Ctrl+V)" ${mbClipGet() ? '' : 'hidden'}>Pegar</button>
         <button class="btn sm" data-mb="undo" title="Deshacer (Ctrl+Z)">↶</button><button class="btn sm" data-mb="redo" title="Rehacer (Ctrl+Y)">↷</button>
         <button class="btn sm pri" data-mb="png">Descargar PNG</button>
       </div>
       <div class="row mb-ctx" id="mbCtx"></div>
     </div>
     <div class="mb-stage" id="mbStage"><div class="mb-wrap" id="mbWrap"><div class="mb-board bg-${cv.bg}" id="mbBoard"></div></div></div>
-    <p class="muted mb-help">Arrastra imágenes desde tu PC o pégalas con Ctrl+V (también sobre un hueco) · doble clic en un texto para escribir · Supr borra · Ctrl+D duplica · Ctrl+Z deshace</p>
+    <p class="muted mb-help">Arrastra imágenes desde tu PC o pégalas con Ctrl+V (también sobre un hueco) · doble clic en un texto para escribir · Ctrl+C / Ctrl+X copia o corta y Ctrl+V pega (también en otra escena) · Supr borra · Ctrl+D duplica · Ctrl+Z deshace</p>
   </section></div>`;
   bindSide(id => { mbStopEdit(); UI.sid = id; renderMoodboard(); });
   mbDraw(); mbFit(); mbBind(); mbPresence();
@@ -2172,7 +2173,7 @@ function mbCtx(empty) {
     <button class="btn sm" data-ctxb="refresh" title="Volver a buscar la vista previa">↻</button>`;
   const names = { text: 'Texto', note: 'Nota', img: 'Imagen', slot: 'Hueco', color: 'Color', link: 'Enlace' };
   box.innerHTML = `<b class="mb-kind">${names[it.type]}</b>${specific}<span class="spacer"></span>
-    <button class="btn sm" data-ctxb="dup" title="Ctrl+D">Duplicar</button><button class="btn sm" data-ctxb="front">Al frente</button><button class="btn sm" data-ctxb="back">Atrás</button>
+    <button class="btn sm" data-ctxb="copy" title="Copiar (Ctrl+C) para pegarlo aquí o en otra escena">Copiar</button><button class="btn sm" data-ctxb="cut" title="Cortar (Ctrl+X) para llevarlo a otra escena">Cortar</button><button class="btn sm" data-ctxb="dup" title="Ctrl+D">Duplicar</button><button class="btn sm" data-ctxb="front">Al frente</button><button class="btn sm" data-ctxb="back">Atrás</button>
     <button class="btn sm" data-ctxb="rot0" title="Quitar el giro">0°</button><button class="btn sm danger" data-ctxb="del" title="Supr">Borrar</button>`;
 }
 function mbRedrawItem(it) { const el = $(`#mbBoard [data-id="${it.id}"]`); if (!el) return mbDraw(); const t = document.createElement('template'); t.innerHTML = mbItemHTML(it); const n = t.content.firstChild; el.replaceWith(n); hydrate(n); mbSyncSel(); }
@@ -2189,6 +2190,7 @@ function mbBind() {
       if (k === 'redo') return mbUndo(true);
       if (k === 'png') return mbExportPng();
       if (k === 'link') return mbLinkDialog();
+      if (k === 'paste') return mbPasteClip();
       return mbNew(k);
     }
     const c = e.target.closest('[data-ctxb]'); if (!c) return;
@@ -2198,6 +2200,7 @@ function mbBind() {
     if (k === 'open') return mbOpenLink(it);
     if (k === 'refresh') return mbFetchLink(it);
     if (k === 'view') { openImage(await imgGet(it.img)); return; }
+    if (k === 'copy' || k === 'cut') { const c = mbCopy(k === 'cut'); if (c) navigator.clipboard?.writeText(MB_MARK + c.t).catch(() => {}); return; }
     mbHist();
     if (k === 'align') it.align = c.dataset.v;
     else if (k === 'dup') { const n = { ...JSON.parse(JSON.stringify(it)), id: uid(), x: it.x + 24, y: it.y + 24 }; items.push(n); MB.sel = n.id; }
@@ -2310,8 +2313,48 @@ document.addEventListener('keydown', e => {
     mbPlace($(`#mbBoard [data-id="${it.id}"]`), it); mbSendMove(it); save();
   }
 });
+/* ---------- Copiar, cortar y pegar elementos (entre escenas y entre guiones) ----------
+   Lo copiado se guarda en este navegador; al portapapeles va solo una marca para saber que hay que pegarlo. */
+const MB_CLIP = 'glanx.mbclip', MB_MARK = 'glanx-moodboard:';
+function mbClipGet() { try { const c = JSON.parse(localStorage.getItem(MB_CLIP)); return c?.items?.length ? c : null; } catch { return null; } }
+function mbCopy(cut) {
+  const it = mbFind(MB.sel); if (!it) return null;
+  if (cut && bodyRO()) { roWarn(); return null; }
+  const c = { t: Date.now(), pid: P.id, items: [mbClean(JSON.parse(JSON.stringify(it)))] };
+  try { localStorage.setItem(MB_CLIP, JSON.stringify(c)); } catch { toast('No se pudo copiar: el navegador está lleno'); return null; }
+  const b = $('#mbPasteBtn'); if (b) b.hidden = false;
+  if (cut) { mbHist(); const items = mbCv().items; items.splice(items.indexOf(it), 1); MB.sel = null; save(); mbDraw(); }
+  toast(cut ? 'Cortado: abre otra escena y pega con Ctrl+V o «Pegar»' : 'Copiado: pégalo con Ctrl+V o «Pegar», aquí o en otra escena');
+  return c;
+}
+async function mbPasteClip(c = mbClipGet()) {
+  if (!c) return toast('No hay nada copiado');
+  if (bodyRO()) return roWarn();
+  // imágenes que vienen de otro guion de la nube: se suben a este para que las vean los socios
+  if (P.cloud && c.pid !== P.id && (CL.editing || mbLive()))
+    for (const x of c.items) if (x.img) { const d = await imgGet(x.img); if (d) await cloudPutImg(P.id, x.img, d).catch(() => {}); else toast('Una imagen no está en este navegador: ábrela antes en su escena y vuelve a copiarla'); }
+  const cv = mbCv();
+  const made = c.items.map(x => {
+    let off = 0; // si ya está en ese sitio (pegar en la misma escena), se corre un poco
+    while (cv.items.some(i => i.type === x.type && i.x === x.x + off && i.y === x.y + off)) off += 24;
+    const n = { ...JSON.parse(JSON.stringify(x)), id: uid(), x: x.x + off, y: x.y + off }; delete n.z; return n;
+  });
+  mbHist(); cv.items.push(...made); MB.sel = made[made.length - 1].id; save(); mbDraw();
+}
+['copy', 'cut'].forEach(ev => document.addEventListener(ev, e => {
+  if (!P || UI.view !== 'moodboard' || !$('#mbBoard') || MB.editing || !mbFind(MB.sel)) return;
+  if (e.target.closest?.('input,textarea,select,[contenteditable="true"],[contenteditable="plaintext-only"]') || String(getSelection())) return;
+  const c = mbCopy(ev === 'cut'); if (!c) return;
+  e.preventDefault(); e.clipboardData.setData('text/plain', MB_MARK + c.t);
+}));
 document.addEventListener('paste', e => {
   if (!P || UI.view !== 'moodboard' || !$('#mbBoard') || MB.editing || e.target.closest?.('input,textarea')) return;
+  const mark = e.clipboardData?.getData('text/plain') || '';
+  if (mark.startsWith(MB_MARK)) {
+    e.preventDefault(); const c = mbClipGet();
+    if (c && String(c.t) === mark.slice(MB_MARK.length)) mbPasteClip(c); else toast('Lo copiado ya no está disponible: cópialo otra vez');
+    return;
+  }
   const files = [...(e.clipboardData?.items || [])].filter(i => i.type.startsWith('image/')).map(i => i.getAsFile()).filter(Boolean);
   if (files.length) {
     e.preventDefault();
