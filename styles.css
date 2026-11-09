@@ -523,3 +523,12 @@ body.ro #ed{caret-color:transparent}
 .sh-part button:hover{color:var(--bad)}
 body.ro .sh-part button{display:none}
 @media print{.pr-q{font:italic 9pt var(--mono);color:#444;margin-top:2pt}}
+
+/* moodboard en vivo: cursores, selección de los socios y quién está */
+.mb-cur{position:absolute;z-index:10001;pointer-events:none;transform:scale(var(--inv));transform-origin:0 0;transition:left .08s linear,top .08s linear}
+.mb-cur svg{display:block;fill:var(--c);stroke:#fff;stroke-width:1.2;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35))}
+.mb-cur span{position:absolute;left:14px;top:16px;background:var(--c);color:#fff;font:600 11px/1 Inter,sans-serif;padding:3px 6px;border-radius:4px;white-space:nowrap}
+.mb-psel{position:absolute;z-index:9998;pointer-events:none;outline:calc(2px * var(--inv)) solid var(--c);outline-offset:calc(3px * var(--inv))}
+.mb-psel span{position:absolute;left:0;bottom:100%;margin-bottom:calc(5px * var(--inv));transform:scale(var(--inv));transform-origin:0 100%;background:var(--c);color:#fff;font:600 11px/1 Inter,sans-serif;padding:3px 6px;border-radius:4px;white-space:nowrap}
+.cloud-bar .pchip{display:inline-flex;align-items:center;gap:5px;font-weight:600;white-space:nowrap}
+.cloud-bar .pchip::before{content:'';width:8px;height:8px;border-radius:50%;background:var(--c)}

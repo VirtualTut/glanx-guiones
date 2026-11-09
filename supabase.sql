@@ -139,3 +139,28 @@ create policy pr_sel on public.profiles for select using (
       and (p.owner = profiles.id or exists (select 1 from public.project_members m where m.project_id = p.id and m.email = lower(profiles.email)))
   )
 );
+
+-- ===== v3: moodboard en vivo (cada elemento del tablero es una fila; lo editan todos a la vez) =====
+create table if not exists public.mb_items (
+  project_id text not null references public.projects on delete cascade,
+  sid text not null,
+  id text not null,
+  data jsonb not null default '{}',
+  deleted boolean not null default false,
+  client text,
+  updated_by uuid default auth.uid(),
+  updated_at timestamptz not null default now(),
+  primary key (project_id, sid, id)
+);
+alter table public.mb_items enable row level security;
+drop policy if exists mb_sel on public.mb_items;
+drop policy if exists mb_ins on public.mb_items;
+drop policy if exists mb_upd on public.mb_items;
+create policy mb_sel on public.mb_items for select using (public.project_role(project_id) is not null);
+create policy mb_ins on public.mb_items for insert with check (public.project_role(project_id) in ('owner', 'editor'));
+create policy mb_upd on public.mb_items for update
+  using (public.project_role(project_id) in ('owner', 'editor'))
+  with check (public.project_role(project_id) in ('owner', 'editor'));
+do $$ begin
+  begin alter publication supabase_realtime add table public.mb_items; exception when others then null; end;
+end $$;

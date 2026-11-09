@@ -2,7 +2,7 @@
    Todo se guarda en este navegador (localStorage + IndexedDB para imágenes).
    Sin servidor, sin dependencias. */
 'use strict';
-const APP_V = '202611072038';
+const APP_V = '202611091628';
 
 /* ================= Utilidades ================= */
 const $ = (s, r = document) => r.querySelector(s);
@@ -65,15 +65,20 @@ function writeProject(p) {
   l.unshift({ id: p.id, title: p.title, updated: p.updated, cloud: !!p.cloud });
   saveIndex(l);
 }
-let P = null, saveTimer = null;
+let P = null, saveTimer = null, needPush = false;
 function setSaved(txt, bad) { const s = $('#saveState'); if (s) { s.textContent = txt; s.classList.toggle('bad', !!bad); } }
 function persist() {
   saveTimer = null; if (!P) return;
   P.updated = Date.now();
-  try { writeProject(P); setSaved(P.cloud ? 'Guardado' : 'Guardado en este navegador'); cloudAfterSave(); }
+  try { writeProject(P); if (!P.cloud || needPush) setSaved(P.cloud ? 'Guardado' : 'Guardado en este navegador'); if (needPush) { needPush = false; cloudAfterSave(); } }
   catch (e) { setSaved('No se pudo guardar', true); toast('No se pudo guardar: el navegador está lleno. Exporta un respaldo.'); }
 }
-function save() { if (isRO()) { roWarn(); return; } setSaved('Guardando…'); clearTimeout(saveTimer); saveTimer = setTimeout(persist, 450); }
+function save() {
+  // moodboard en vivo: se guarda elemento por elemento, sin turno de edición
+  if (P?.cloud && UI.view === 'moodboard' && mbLive()) { setSaved('Guardando…'); clearTimeout(saveTimer); saveTimer = setTimeout(persist, 450); mbQueue(); return; }
+  if (isRO()) { roWarn(); return; }
+  needPush = true; setSaved('Guardando…'); clearTimeout(saveTimer); saveTimer = setTimeout(persist, 450);
+}
 function flushSave() { if (saveTimer) { clearTimeout(saveTimer); persist(); } }
 
 /* Imágenes en IndexedDB */
@@ -119,7 +124,10 @@ function fileToDataUrl(file, max = 1600) {
 }
 async function storeImage(file) {
   const d = await fileToDataUrl(file); const id = 'i' + uid(); await imgPut(id, d); imgCache.set(id, d);
-  if (P?.cloud && CL.editing) cloudPutImg(P.id, id, d).catch(() => {});
+  if (P?.cloud && (CL.editing || mbLive())) {
+    const up = cloudPutImg(P.id, id, d).catch(() => {});
+    if (mbLive() && UI.view === 'moodboard') await up; // los socios la descargan en cuanto aparece en el tablero
+  }
   return id;
 }
 
@@ -632,6 +640,7 @@ function route() {
       if (CL.pid && CL.pid !== m[1]) cloudLeave();
       P = loadProject(m[1]); UI.sid = null;
       if ((!P || P.cloud) && CL.pid !== m[1]) {
+        UI.view = VIEWS[m[2]] ? m[2] : 'guion';
         cloudOpen(m[1]);
         if (!P) { document.body.classList.add('in-project'); app.innerHTML = '<p class="muted pad">Abriendo el guion de la nube…</p>'; return; }
       }
@@ -649,9 +658,9 @@ function render() {
   $('#projTitle').value = P.title;
   $$('#tabs a').forEach(a => { a.classList.toggle('on', a.dataset.view === UI.view); a.href = `#/p/${P.id}/${a.dataset.view}`; });
   setSaved(P.cloud ? (CL.editing ? 'Guardado en la nube' : '') : P.updated ? 'Guardado en este navegador' : '');
-  document.body.classList.toggle('ro', isRO()); $('#projTitle').readOnly = isRO();
+  document.body.classList.toggle('ro', bodyRO()); $('#projTitle').readOnly = isRO();
   VIEWS[UI.view]();
-  cloudBar(); markCommented(); if (CL.open) cmtRender();
+  cloudBar(); markCommented(); if (CL.open) cmtRender(); mbPresence();
 }
 window.addEventListener('hashchange', route);
 window.addEventListener('beforeunload', () => { syncNow(); flushSave(); });
@@ -1790,7 +1799,7 @@ const MB_FONTS = {
 const MB_BGS = { paper: { label: 'Papel', c: '#f1efea' }, white: { label: 'Blanco', c: '#ffffff' }, kraft: { label: 'Kraft', c: '#cdb48d' }, dark: { label: 'Negro', c: '#161616' } };
 const MB_FRAMES = { none: 'Sin marco', white: 'Marco blanco', torn: 'Borde rasgado', tape: 'Con cinta' };
 const MB_PALETTE = ['#efeee8', '#282828', '#ba3f1e', '#cd711c', '#5b6b2e', '#2f4b6e', '#d9b48f', '#8a2f3c'];
-const MB = { sid: null, sel: null, scale: 1, hist: [], fut: [], histSid: null, editing: null };
+const MB = { sid: null, sel: null, scale: 1, hist: [], fut: [], histSid: null, editing: null, drag: null, remote: new Set() };
 
 function mbBoard(sid) {
   P.canvas ||= {};
@@ -1846,6 +1855,7 @@ function mbPlace(el, it) {
 /* marco de selección con tiradores, siempre por encima de todo */
 function mbSyncSel() {
   const box = $('#mbSel'); if (!box) return;
+  mbPeersDraw(); mbPresence();
   const it = mbFind(MB.sel); const el = it && $(`#mbBoard [data-id="${it.id}"]`);
   if (!el) { box.hidden = true; return; }
   box.hidden = false;
@@ -2006,7 +2016,7 @@ function mbOpenLink(it) {
 function renderMoodboard() {
   const scenes = getScenes(); ensureSid(scenes, true);
   const sid = UI.sid; const s = scenes.find(x => x.id === sid);
-  if (MB.histSid !== sid) { MB.hist = []; MB.fut = []; MB.histSid = sid; MB.sel = null; }
+  if (MB.histSid !== sid) { MB.hist = []; MB.fut = []; MB.histSid = sid; MB.sel = null; MB.remote.clear(); }
   MB.sid = sid; MB.editing = null;
   const cv = mbBoard(sid);
   app.innerHTML = `<div class="layout"><aside class="side">${sceneList(scenes, { general: true, right: x => P.canvas?.[x.id]?.items.length || '' })}</aside>
@@ -2028,7 +2038,7 @@ function renderMoodboard() {
     <p class="muted mb-help">Arrastra imágenes desde tu PC o pégalas con Ctrl+V (también sobre un hueco) · doble clic en un texto para escribir · Supr borra · Ctrl+D duplica · Ctrl+Z deshace</p>
   </section></div>`;
   bindSide(id => { mbStopEdit(); UI.sid = id; renderMoodboard(); });
-  mbDraw(); mbFit(); mbBind();
+  mbDraw(); mbFit(); mbBind(); mbPresence();
   if (!cv.items.length) mbCtx(true);
 }
 function mbDraw() {
@@ -2053,7 +2063,16 @@ function mbHist() { MB.hist.push(JSON.stringify(mbCv())); if (MB.hist.length > 6
 function mbUndo(redo) {
   const from = redo ? MB.fut : MB.hist, to = redo ? MB.hist : MB.fut;
   if (!from.length) return toast(redo ? 'Nada que rehacer' : 'Nada que deshacer');
-  to.push(JSON.stringify(mbCv())); P.canvas[MB.sid] = JSON.parse(from.pop());
+  const cur = mbCv(), snap = JSON.parse(from.pop());
+  to.push(JSON.stringify(cur));
+  // lo que cambiaron los socios no se deshace: se queda como está ahora
+  for (const id of MB.remote) {
+    const c = cur.items.find(x => x.id === id), i = snap.items.findIndex(x => x.id === id);
+    if (c) { const cp = JSON.parse(JSON.stringify(c)); if (i >= 0) snap.items[i] = cp; else snap.items.push(cp); }
+    else if (i >= 0) snap.items.splice(i, 1);
+  }
+  if (MB.remote.size) { snap.items.sort(byZ); mbZ(snap.items); }
+  P.canvas[MB.sid] = snap;
   if (!mbFind(MB.sel)) MB.sel = null;
   save(); mbDraw();
 }
@@ -2116,11 +2135,13 @@ function mbEdit(el, it) {
   tx.onblur = () => {
     tx.contentEditable = 'false'; el.classList.remove('editing'); MB.editing = null;
     const v = tx.innerText.replace(/\n$/, '');
-    if (v !== it.text) { it.text = v; save(); } else MB.hist.pop();
+    if (v !== it.text || typed) { it.text = v; save(); } else MB.hist.pop();
     mbSyncSel();
   };
+  let typed = false;
   tx.onkeydown = ev => { if (ev.key === 'Escape') { ev.preventDefault(); tx.blur(); } ev.stopPropagation(); };
-  tx.oninput = () => mbSyncSel(); mbSyncSel();
+  // en la nube los socios ven lo que se escribe mientras se escribe
+  tx.oninput = () => { mbSyncSel(); if (mbLive()) { it.text = tx.innerText.replace(/\n$/, ''); typed = true; save(); } }; mbSyncSel();
 }
 function mbStopEdit() { if (MB.editing) document.activeElement?.blur?.(); }
 
@@ -2180,8 +2201,8 @@ function mbBind() {
     mbHist();
     if (k === 'align') it.align = c.dataset.v;
     else if (k === 'dup') { const n = { ...JSON.parse(JSON.stringify(it)), id: uid(), x: it.x + 24, y: it.y + 24 }; items.push(n); MB.sel = n.id; }
-    else if (k === 'front') { items.splice(items.indexOf(it), 1); items.push(it); }
-    else if (k === 'back') { items.splice(items.indexOf(it), 1); items.unshift(it); }
+    else if (k === 'front') { mbZ(items); it.z = Math.max(...items.map(i => i.z)) + 1; items.splice(items.indexOf(it), 1); items.push(it); }
+    else if (k === 'back') { mbZ(items); it.z = Math.min(...items.map(i => i.z)) - 1; items.splice(items.indexOf(it), 1); items.unshift(it); }
     else if (k === 'rot0') it.rot = 0;
     else if (k === 'del') { items.splice(items.indexOf(it), 1); MB.sel = null; }
     save(); mbDraw();
@@ -2232,7 +2253,7 @@ function mbBind() {
     const mv = ev => {
       const dx = (ev.clientX - sx) / s, dy = (ev.clientY - sy) / s;
       if (!moved && Math.hypot(dx, dy) < 3) return;
-      if (!moved) { mbHist(); moved = true; }
+      if (!moved) { mbHist(); moved = true; MB.drag = it.id; }
       if (!h) { it.x = Math.round(o.x + dx); it.y = Math.round(o.y + dy); }
       else if (h === 'rs') {
         const a = o.rot * Math.PI / 180, lx = dx * Math.cos(a) + dy * Math.sin(a), ly = -dx * Math.sin(a) + dy * Math.cos(a);
@@ -2244,11 +2265,14 @@ function mbBind() {
         if (Math.abs(ang) < 3) ang = 0;
         it.rot = Math.round(ang * 10) / 10;
       }
-      mbPlace(el, it);
+      mbPlace(el, it); mbSendMove(it);
     };
-    const up = () => { cap.removeEventListener('pointermove', mv); cap.removeEventListener('pointerup', up); cap.removeEventListener('pointercancel', up); if (moved) save(); };
+    const up = () => { cap.removeEventListener('pointermove', mv); cap.removeEventListener('pointerup', up); cap.removeEventListener('pointercancel', up); MB.drag = null; if (moved) save(); };
     cap.addEventListener('pointermove', mv); cap.addEventListener('pointerup', up); cap.addEventListener('pointercancel', up);
   });
+  // cursor visible para los socios
+  board.addEventListener('pointermove', e => { if (mbLive()) mbSendCur(mbPoint(e)); });
+  board.addEventListener('pointerleave', () => { if (mbLive()) mbSendCur(null); });
   board.addEventListener('dblclick', e => {
     const el = e.target.closest('.mb-item'); if (!el) return; const it = mbFind(el.dataset.id); if (!it) return;
     if (it.type === 'text' || it.type === 'note') mbEdit(el, it);
@@ -2283,7 +2307,7 @@ document.addEventListener('keydown', e => {
   else if (e.key.startsWith('Arrow')) {
     e.preventDefault(); const d = e.shiftKey ? 10 : 1;
     if (e.key === 'ArrowLeft') it.x -= d; if (e.key === 'ArrowRight') it.x += d; if (e.key === 'ArrowUp') it.y -= d; if (e.key === 'ArrowDown') it.y += d;
-    mbPlace($(`#mbBoard [data-id="${it.id}"]`), it); save();
+    mbPlace($(`#mbBoard [data-id="${it.id}"]`), it); mbSendMove(it); save();
   }
 });
 document.addEventListener('paste', e => {
@@ -2579,18 +2603,45 @@ async function cloudOpen(id) {
   }
   CL.role = data.owner === CL.user.id ? 'owner' : (await CL.sb.rpc('project_role', { pid: id })).data || 'viewer';
   applyRow(data);
-  CL.chan = CL.sb.channel('p-' + id)
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'projects', filter: `id=eq.${id}` }, ev => onRemoteRow(ev.new))
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'comments', filter: `project_id=eq.${id}` }, () => loadComments())
-    .subscribe();
+  await mbLiveLoad();
+  if (CL.pid !== id) return;
+  cloudChannel(id);
   await loadPeople(); await loadComments();
   if (CL.role !== 'viewer') await tryLock(true); else rerender();
   if (CL.goC?.project_id === id) setTimeout(() => focusComment(CL.goC), 300);
   clearInterval(CL.tick); CL.tick = setInterval(cloudTick, 15e3);
 }
+function cloudChannel(id) {
+  CL.chan = CL.sb.channel('p-' + id, { config: { presence: { key: MBL.cid }, broadcast: { self: false } } })
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'projects', filter: `id=eq.${id}` }, ev => onRemoteRow(ev.new))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'comments', filter: `project_id=eq.${id}` }, () => loadComments());
+  if (MBL.ready) CL.chan
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'mb_items', filter: `project_id=eq.${id}` }, ev => mbRemote(ev.new))
+    .on('broadcast', { event: 'mv' }, ({ payload }) => mbRemoteMove(payload))
+    .on('broadcast', { event: 'cur' }, ({ payload }) => mbRemoteCur(payload))
+    .on('presence', { event: 'sync' }, () => { mbCursPrune(); mbPeersDraw(); cloudBar(); });
+  CL.chan.subscribe(st => {
+    if (st !== 'SUBSCRIBED' || CL.pid !== id) return;
+    if (MBL.subOnce) mbReload(); // al reconectar se trae lo que haya cambiado mientras tanto
+    MBL.subOnce = true; MBL.lastTrack = ''; mbPresence();
+  });
+}
+// si la conexión en vivo se cayó (pestaña en segundo plano, wifi…), se reabre y se trae lo que cambió
+async function cloudRejoin() {
+  if (!CL.pid || !CL.chan || ['joined', 'joining'].includes(CL.chan.state)) return;
+  const id = CL.pid;
+  try { await CL.sb.removeChannel(CL.chan); } catch { }
+  if (CL.pid !== id) return;
+  cloudChannel(id); loadComments();
+  if (!CL.editing && await refetch()) safeRerender();
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) cloudRejoin(); });
+window.addEventListener('online', () => cloudRejoin());
 function applyRow(row) {
   CL.row = row;
+  const keep = MBL.ready && P?.id === row.id ? P.canvas : null; // el moodboard vive en mb_items, no en el guion
   const p = normalizeProject(row.data); p.cloud = true; p.title = row.title || p.title; p.updated = new Date(row.updated_at).getTime();
+  if (keep) { p.canvas = keep; p.boards = {}; }
   P = p; writeProject(P);
 }
 async function refetch() {
@@ -2602,7 +2653,13 @@ async function onRemoteRow(row) {
   if (!CL.row || row.id !== CL.pid) return;
   const changed = row.updated_at !== CL.row.updated_at && row.updated_by !== CL.user.id;
   Object.assign(CL.row, { lock_user: row.lock_user, lock_name: row.lock_name, lock_at: row.lock_at, updated_at: row.updated_at, updated_by_name: row.updated_by_name, title: row.title });
-  if (changed && !CL.editing) { await refetch(); safeRerender(); return; }
+  if (changed && !CL.editing) {
+    const sig = () => getScenes().map(s => s.id + s.heading).join('|'), before = UI.view === 'moodboard' && P ? sig() : null;
+    await refetch();
+    // en el moodboard solo se repinta si cambiaron las escenas (no por cada letra del guion)
+    if (before !== null && UI.view === 'moodboard' && before === sig()) { cloudBar(); return; }
+    safeRerender(); return;
+  }
   cloudBar();
 }
 async function tryLock(first) {
@@ -2636,7 +2693,7 @@ function cloudAfterSave() {
 async function cloudPush() {
   CL.pushT = null; if (!P?.cloud || !CL.editing) return;
   const at = new Date().toISOString();
-  const { data, error } = await CL.sb.from('projects').update({ data: P, title: P.title, updated_at: at, updated_by: CL.user.id, updated_by_name: myName() }).eq('id', P.id).select('id');
+  const { data, error } = await CL.sb.from('projects').update({ data: cloudData(), title: P.title, updated_at: at, updated_by: CL.user.id, updated_by_name: myName() }).eq('id', P.id).select('id');
   if (error) { setSaved('Sin conexión: se reintentará', true); CL.pushT = setTimeout(cloudPush, 8000); return; }
   if (!data?.length) { CL.editing = false; clearInterval(CL.beat); toast('No se guardó en la nube: ya no tienes el turno de edición.'); await refetch(); rerender(); return; }
   CL.row.updated_at = at; setSaved('Guardado en la nube');
@@ -2644,20 +2701,22 @@ async function cloudPush() {
 async function cloudLeave() {
   const pid = CL.pid; if (!pid) return;
   if (CL.pushT) { clearTimeout(CL.pushT); await cloudPush(); }
+  if (MBL.t) { clearTimeout(MBL.t); await mbSync(); }
   clearInterval(CL.beat); clearInterval(CL.tick);
   if (CL.editing) CL.sb.rpc('release_lock', { pid }).then(() => {}, () => {});
   if (CL.chan) CL.sb.removeChannel(CL.chan);
+  mbLiveReset();
   Object.assign(CL, { pid: null, row: null, editing: false, chan: null, comments: [], draft: null, reply: null });
   $('#cloudBar').hidden = true; cmtClose();
 }
 window.addEventListener('pagehide', () => {
   if (!CL.editing || !CL.pid || !CL.token) return;
   const h = { apikey: SB_KEY, Authorization: 'Bearer ' + CL.token, 'Content-Type': 'application/json' };
-  if (CL.pushT) { const body = JSON.stringify({ data: P, title: P.title, updated_at: new Date().toISOString(), updated_by: CL.user.id, updated_by_name: myName() });
+  if (CL.pushT) { const body = JSON.stringify({ data: cloudData(), title: P.title, updated_at: new Date().toISOString(), updated_by: CL.user.id, updated_by_name: myName() });
     if (body.length < 60000) fetch(`${SB_URL}/rest/v1/projects?id=eq.${encodeURIComponent(CL.pid)}`, { method: 'PATCH', keepalive: true, headers: h, body }); }
   fetch(`${SB_URL}/rest/v1/rpc/release_lock`, { method: 'POST', keepalive: true, headers: h, body: JSON.stringify({ pid: CL.pid }) });
 });
-function cloudTick() { if (!CL.pid) return clearInterval(CL.tick); cloudBar(); }
+function cloudTick() { if (!CL.pid) return clearInterval(CL.tick); cloudRejoin(); cloudBar(); }
 function rerender() {
   if (!P) return;
   const sc = ['.main', '.paper-scroll', '.side', '.mb-stage'].map(s => [s, $(s)?.scrollTop]);
@@ -2667,7 +2726,7 @@ function rerender() {
 }
 // no recargar mientras alguien selecciona texto o escribe un comentario
 function safeRerender() {
-  const sel = getSelection(), busy = (sel.rangeCount && !sel.isCollapsed) || document.activeElement?.closest?.('#cmt,#dialog');
+  const sel = getSelection(), busy = (sel.rangeCount && !sel.isCollapsed) || document.activeElement?.closest?.('#cmt,#dialog,#mbCtx') || MB.editing || MB.drag;
   clearTimeout(CL.rrT);
   if (busy) { CL.rrT = setTimeout(safeRerender, 1500); return; }
   rerender();
@@ -2677,12 +2736,16 @@ function cloudBar() {
   if (!P?.cloud || !CL.row) { b.hidden = true; return; }
   const r = CL.row, other = lockFresh(r) && r.lock_user !== CL.user.id;
   let h;
-  if (CL.editing) h = `<span class="dot ed"></span><span>Estás editando. Tus socios lo ven en modo lectura.</span><button class="btn sm" data-release>Dejar de editar</button>`;
+  if (UI.view === 'moodboard' && MBL.ready) {
+    const who = mbPeers().filter(p => p.view === 'moodboard').map(p => `<span class="pchip" style="--c:${p.color}">${esc(p.name)}</span>`).join('');
+    h = CL.role === 'viewer' ? `<span class="dot"></span><span>Solo lectura: ves el moodboard en vivo y puedes comentar.</span>${who}`
+      : `<span class="dot ed"></span><span>Moodboard en vivo: todos lo editan a la vez.</span>${who ? `<span class="muted">Aquí:</span>${who}` : ''}`;
+  } else if (CL.editing) h = `<span class="dot ed"></span><span>Estás editando. Tus socios lo ven en modo lectura.</span><button class="btn sm" data-release>Dejar de editar</button>`;
   else if (CL.role === 'viewer') h = `<span class="dot"></span><span>Solo lectura: puedes ver y comentar.</span>`;
   else if (other) h = `<span class="dot ro"></span><span><b>${esc(r.lock_name || 'Alguien')}</b> está editando. Estás en modo lectura: ves sus cambios en vivo y puedes comentar.</span>`;
   else h = `<span class="dot free"></span><span>Nadie está editando.</span><button class="btn sm pri" data-take>Editar</button>`;
   b.innerHTML = h; b.hidden = false;
-  document.body.classList.toggle('ro', isRO());
+  document.body.classList.toggle('ro', bodyRO());
 }
 $('#cloudBar').addEventListener('click', async e => {
   if (e.target.closest('[data-release]')) { await cloudRelease(); toast('Listo: el guion quedó libre para tus socios'); }
@@ -2693,6 +2756,208 @@ function roWarn() {
   if (Date.now() - CL.lastAct > 1500 || Date.now() - roToastAt < 4000) return;
   roToastAt = Date.now();
   toast(CL.role === 'viewer' ? 'Solo lectura: puedes comentar' : lockFresh(CL.row) ? `Modo lectura: ${CL.row.lock_name || 'otra persona'} está editando` : 'Pulsa «Editar» (abajo) para tomar el turno');
+}
+
+/* ---- Moodboard en vivo ----
+   Cada elemento del tablero es una fila de mb_items: todos los socios con permiso lo editan a la vez, sin turno.
+   Al soltar un elemento se guarda solo ese; mientras se arrastra, los demás lo ven moverse (broadcast).
+   También se ven los cursores y lo que tiene seleccionado cada uno (presence). */
+const MBL = { cid: uid(), ready: false, base: new Map(), t: null, busy: false, again: false, subOnce: false, lastTrack: '', curs: {}, wt: null };
+const mbLive = () => !!(P?.cloud && MBL.ready && CL.pid === P.id && CL.role && CL.role !== 'viewer');
+const bodyRO = () => isRO() && !(UI.view === 'moodboard' && mbLive());
+const byZ = (a, b) => (a.z ?? 1e15) - (b.z ?? 1e15); // lo que aún no tiene z (recién creado) va arriba
+const mbKey = (sid, id) => sid + '|' + id;
+const PEER_COLORS = ['#ff6b4a', '#3e9bff', '#2fbf71', '#b56cff', '#f5a623', '#ff4fa3', '#00b8c4'];
+const colorOf = s => PEER_COLORS[[...String(s)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 3) % PEER_COLORS.length];
+function cloudData() { if (!MBL.ready) return P; const d = { ...P }; delete d.canvas; return d; }
+// orden de capas: cada elemento lleva z; lo que no lo tiene (o quedó desordenado) se numera tras el anterior
+function mbZ(items) { let prev = -Infinity; for (const it of items) { if (typeof it.z !== 'number' || it.z <= prev) it.z = prev === -Infinity ? 0 : prev + 1; prev = it.z; } }
+const mbClean = it => { const o = { ...it }; delete o.loading; return o; };
+
+async function mbLiveLoad() {
+  const pid = CL.pid; if (!pid || !CL.sb) return;
+  const { data, error } = await CL.sb.from('mb_items').select('sid,id,data,deleted').eq('project_id', pid);
+  if (CL.pid !== pid || P?.id !== pid) return;
+  if (error) { console.warn('moodboard en vivo no disponible:', error.message); MBL.ready = false; return; }
+  const base = new Map();
+  if (!data.length) {
+    // primera vez en vivo: se suben los tableros que ya tenía el guion
+    if (CL.role === 'viewer') { MBL.ready = true; MBL.base = base; return; }
+    for (const sid of Object.keys(P.boards || {})) if (P.boards[sid]?.length) mbBoard(sid);
+    const rows = [];
+    for (const [sid, cv] of Object.entries(P.canvas || {})) {
+      mbZ(cv.items);
+      if (cv.bg && cv.bg !== 'paper') rows.push({ sid, id: '_board', data: { bg: cv.bg } });
+      for (const it of cv.items) rows.push({ sid, id: it.id, data: mbClean(it) });
+    }
+    if (rows.length) {
+      const at = new Date().toISOString();
+      const { error: e2 } = await CL.sb.from('mb_items').upsert(rows.map(r => ({ project_id: pid, ...r, deleted: false, client: MBL.cid, updated_at: at })), { ignoreDuplicates: true });
+      if (e2) { console.warn('mb seed', e2.message); MBL.ready = false; return; }
+      rows.forEach(r => base.set(mbKey(r.sid, r.id), JSON.stringify(r.data)));
+    }
+    P.boards = {}; MBL.base = base; MBL.ready = true; return;
+  }
+  const canvas = {};
+  for (const r of data) {
+    if (r.deleted) continue;
+    const cv = canvas[r.sid] ||= { bg: 'paper', items: [] };
+    if (r.id === '_board') cv.bg = r.data?.bg || 'paper'; else cv.items.push(r.data);
+    base.set(mbKey(r.sid, r.id), JSON.stringify(r.data));
+  }
+  for (const cv of Object.values(canvas)) cv.items.sort(byZ);
+  P.canvas = canvas; P.boards = {}; MBL.base = base; MBL.ready = true;
+  try { writeProject(P); } catch { }
+}
+async function mbReload() {
+  if (MBL.t) { clearTimeout(MBL.t); await mbSync(); }
+  await mbLiveLoad();
+  if (UI.view === 'moodboard' && $('#mbBoard') && !MB.editing && !MB.drag) { if (!mbFind(MB.sel)) MB.sel = null; mbDraw(); }
+}
+function mbLiveReset() {
+  clearTimeout(MBL.t); clearTimeout(MBL.wt);
+  Object.assign(MBL, { ready: false, base: new Map(), t: null, busy: false, again: false, subOnce: false, lastTrack: '', curs: {} });
+}
+
+/* guardar: se compara cada tablero con lo último que hay en la nube y se suben solo las diferencias */
+function mbQueue() { clearTimeout(MBL.t); MBL.t = setTimeout(mbSync, 150); }
+async function mbSync() {
+  MBL.t = null; if (!mbLive()) return;
+  if (MBL.busy) { MBL.again = true; return; }
+  const pid = P.id, rows = [], seen = new Set();
+  for (const [sid, cv] of Object.entries(P.canvas || {})) {
+    mbZ(cv.items);
+    const bk = mbKey(sid, '_board'), bj = JSON.stringify({ bg: cv.bg || 'paper' });
+    if ((cv.bg || 'paper') !== 'paper' || MBL.base.has(bk)) { seen.add(bk); if (MBL.base.get(bk) !== bj) rows.push({ sid, id: '_board', data: { bg: cv.bg || 'paper' }, j: bj }); }
+    for (const it of cv.items) {
+      const k = mbKey(sid, it.id), d = mbClean(it), j = JSON.stringify(d); seen.add(k);
+      if (MBL.base.get(k) !== j) rows.push({ sid, id: it.id, data: d, j });
+    }
+  }
+  for (const k of MBL.base.keys()) if (!seen.has(k)) { const i = k.indexOf('|'); rows.push({ sid: k.slice(0, i), id: k.slice(i + 1), data: {}, del: true }); }
+  if (!rows.length) { setSaved('Guardado en la nube'); return; }
+  MBL.busy = true;
+  const at = new Date().toISOString();
+  const { error } = await CL.sb.from('mb_items').upsert(rows.map(r => ({ project_id: pid, sid: r.sid, id: r.id, data: r.data, deleted: !!r.del, client: MBL.cid, updated_at: at, updated_by: CL.user.id })));
+  MBL.busy = false;
+  if (P?.id !== pid) return;
+  if (error) { setSaved('Sin conexión: se reintentará', true); MBL.t = setTimeout(mbSync, 5000); return; }
+  rows.forEach(r => r.del ? MBL.base.delete(mbKey(r.sid, r.id)) : MBL.base.set(mbKey(r.sid, r.id), r.j));
+  setSaved('Guardado en la nube');
+  if (MBL.again) { MBL.again = false; mbQueue(); }
+}
+
+/* cambios que llegan de los socios */
+function mbRemote(r) {
+  if (!r || r.project_id !== CL.pid || !P?.canvas || r.client === MBL.cid) return;
+  const k = mbKey(r.sid, r.id);
+  if (r.deleted) MBL.base.delete(k); else MBL.base.set(k, JSON.stringify(r.data));
+  const cv = P.canvas[r.sid] ||= { bg: 'paper', items: [] };
+  const here = UI.view === 'moodboard' && MB.sid === r.sid && $('#mbBoard');
+  clearTimeout(MBL.wt); MBL.wt = setTimeout(() => { try { if (P) writeProject(P); } catch { } }, 1500);
+  if (r.id === '_board') {
+    cv.bg = r.deleted ? 'paper' : r.data?.bg || 'paper';
+    if (here) { $('#mbBoard').className = `mb-board bg-${cv.bg}`; const s = $('[data-mbsel="bg"]'); if (s) s.value = cv.bg; }
+    return;
+  }
+  if (MB.sid === r.sid) MB.remote.add(r.id);
+  const i = cv.items.findIndex(x => x.id === r.id);
+  if (r.deleted) { if (i >= 0) cv.items.splice(i, 1); if (MB.sel === r.id && MB.sid === r.sid) MB.sel = null; }
+  else if (i >= 0) {
+    const it = cv.items[i], txt = it.text;
+    for (const key of Object.keys(it)) delete it[key];
+    Object.assign(it, r.data);
+    if (MB.editing === r.id) it.text = txt; // lo que estoy escribiendo no se pisa
+  } else cv.items.push(r.data);
+  cv.items.sort(byZ); mbZ(cv.items);
+  if (here) mbLiveDraw(r.id);
+}
+function mbLiveDraw(id) {
+  const board = $('#mbBoard'); if (!board) return;
+  const cv = mbCv(), it = cv.items.find(x => x.id === id), el = board.querySelector(`.mb-item[data-id="${id}"]`);
+  if (!it) { el?.remove(); if (!cv.items.length && !MB.editing) mbDraw(); else { if (!document.activeElement?.closest?.('#mbCtx')) mbCtx(); mbSyncSel(); } return; }
+  if (MB.editing === id) { if (el) mbPlace(el, it); return; }
+  const t = document.createElement('template'); t.innerHTML = mbItemHTML(it); const n = t.content.firstChild;
+  el?.remove(); board.querySelector('.mb-empty')?.remove();
+  const next = cv.items[cv.items.indexOf(it) + 1], nel = next && board.querySelector(`.mb-item[data-id="${next.id}"]`);
+  board.insertBefore(n, nel || $('#mbSel'));
+  hydrate(n);
+  if (MB.sel === id && !document.activeElement?.closest?.('#mbCtx')) mbCtx();
+  mbSyncSel();
+}
+
+/* arrastre en directo */
+function throttle(fn, ms) {
+  let last = 0, t = null, args;
+  return (...a) => {
+    args = a; const now = Date.now();
+    if (now - last >= ms) { last = now; fn(...args); }
+    else if (!t) t = setTimeout(() => { t = null; last = Date.now(); fn(...args); }, ms - (now - last));
+  };
+}
+const mbSendMove = throttle(it => {
+  if (!mbLive() || !CL.chan) return;
+  CL.chan.send({ type: 'broadcast', event: 'mv', payload: { sid: MB.sid, id: it.id, x: it.x, y: it.y, w: it.w, h: it.h, rot: it.rot || 0 } });
+}, 50);
+function mbRemoteMove(m) {
+  if (!m || !P?.canvas?.[m.sid]) return;
+  const it = P.canvas[m.sid].items.find(x => x.id === m.id); if (!it || MB.drag === it.id) return;
+  Object.assign(it, { x: m.x, y: m.y, w: m.w, h: m.h, rot: m.rot });
+  if (UI.view === 'moodboard' && MB.sid === m.sid) { const el = $(`#mbBoard .mb-item[data-id="${m.id}"]`); if (el) mbPlace(el, it); }
+}
+
+/* quién está, cursores y selección de cada uno */
+function mbPeers() {
+  if (!CL.chan || !MBL.subOnce) return [];
+  const st = CL.chan.presenceState(), out = [];
+  for (const [k, metas] of Object.entries(st)) if (k !== MBL.cid && metas[0]) out.push({ k, ...metas[0] });
+  return out;
+}
+function mbPresence() {
+  if (!CL.chan || !MBL.subOnce || !CL.user || !MBL.ready) return;
+  const on = UI.view === 'moodboard';
+  const st = { name: myName(), color: colorOf(CL.user.id), view: UI.view, sid: on ? MB.sid : null, sel: on ? MB.sel : null };
+  const j = JSON.stringify(st); if (j === MBL.lastTrack) return;
+  MBL.lastTrack = j; Promise.resolve(CL.chan.track(st)).catch(() => { MBL.lastTrack = ''; });
+}
+const mbSendCur = throttle(pt => {
+  if (!CL.chan || !MBL.subOnce) return;
+  CL.chan.send({ type: 'broadcast', event: 'cur', payload: { k: MBL.cid, sid: MB.sid, x: pt ? Math.round(pt.x) : null, y: pt ? Math.round(pt.y) : null, name: myName(), color: colorOf(CL.user.id) } });
+}, 60);
+function mbRemoteCur(c) {
+  if (!c?.k) return;
+  clearTimeout(MBL.curs[c.k]?.t);
+  if (c.x == null) delete MBL.curs[c.k];
+  else MBL.curs[c.k] = { ...c, t: setTimeout(() => { delete MBL.curs[c.k]; mbCursDraw(); }, 8000) };
+  mbCursDraw();
+}
+function mbCursPrune() {
+  const live = new Set(Object.keys(CL.chan?.presenceState() || {}));
+  for (const k of Object.keys(MBL.curs)) if (!live.has(k)) { clearTimeout(MBL.curs[k].t); delete MBL.curs[k]; }
+  mbCursDraw();
+}
+function mbCursDraw() {
+  const board = $('#mbBoard'); if (!board) return;
+  const want = Object.values(MBL.curs).filter(c => c.sid === MB.sid && UI.view === 'moodboard');
+  board.querySelectorAll('.mb-cur').forEach(n => { if (!want.some(c => c.k === n.dataset.k)) n.remove(); });
+  for (const c of want) {
+    let n = board.querySelector(`.mb-cur[data-k="${c.k}"]`);
+    if (!n) { n = document.createElement('div'); n.className = 'mb-cur'; n.dataset.k = c.k; n.innerHTML = `<svg viewBox="0 0 16 20" width="16" height="20"><path d="M1 1l13 10-6 1 3 6-3 1-3-6-4 4z"/></svg><span></span>`; board.appendChild(n); }
+    n.style.left = c.x + 'px'; n.style.top = c.y + 'px'; n.style.setProperty('--c', c.color);
+    n.querySelector('span').textContent = c.name;
+  }
+}
+function mbPeersDraw() {
+  const board = $('#mbBoard'); if (!board) return;
+  board.querySelectorAll('.mb-psel').forEach(n => n.remove());
+  for (const p of mbPeers()) {
+    if (p.view !== 'moodboard' || p.sid !== MB.sid || !p.sel) continue;
+    const it = mbFind(p.sel), el = it && board.querySelector(`.mb-item[data-id="${it.id}"]`); if (!el) continue;
+    const d = document.createElement('div'); d.className = 'mb-psel';
+    d.style.cssText = `left:${it.x}px;top:${it.y}px;width:${it.w}px;height:${it.type === 'text' ? el.offsetHeight : it.h}px;transform:rotate(${it.rot || 0}deg);--c:${p.color}`;
+    d.innerHTML = `<span>${esc(p.name)}</span>`; board.appendChild(d);
+  }
+  mbCursDraw();
 }
 
 /* ---- compartir ---- */
